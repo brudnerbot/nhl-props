@@ -32,6 +32,28 @@ TEAM_STATS = [
     "sh_blocked_shots_for", "sh_blocked_shots_against",
     "sh_goals_for", "sh_goals_against",
     "sh_penalties_taken", "sh_penalty_minutes",
+    # Totals across all strengths
+    "total_shots_on_goal_for", "total_shots_on_goal_against",
+    "total_shot_attempts_for", "total_shot_attempts_against",
+    "total_fenwick_for", "total_fenwick_against",
+    # TOI at each strength
+    # TOI at each strength
+    "ev_toi", "pp_toi", "sh_toi", "en_toi",
+    # Per-60 rate stats at each strength
+    "ev_shots_on_goal_for_per60", "ev_shots_on_goal_against_per60",
+    "ev_shot_attempts_for_per60", "ev_shot_attempts_against_per60",
+    "ev_goals_for_per60", "ev_goals_against_per60",
+    "ev_fenwick_for_per60", "ev_fenwick_against_per60",
+    "ev_hits_for_per60", "ev_hits_against_per60",
+    "ev_giveaways_per60", "ev_takeaways_per60",
+    "pp_shots_on_goal_for_per60", "pp_shots_on_goal_against_per60",
+    "pp_shot_attempts_for_per60", "pp_shot_attempts_against_per60",
+    "pp_goals_for_per60", "pp_goals_against_per60",
+    "pp_fenwick_for_per60", "pp_fenwick_against_per60",
+    "sh_shots_on_goal_for_per60", "sh_shots_on_goal_against_per60",
+    "sh_shot_attempts_for_per60", "sh_shot_attempts_against_per60",
+    "sh_goals_for_per60", "sh_goals_against_per60",
+    "sh_fenwick_for_per60", "sh_fenwick_against_per60",
 ]
 
 
@@ -173,8 +195,71 @@ def add_fenwick(df):
         df[f"{strength}_fenwick_against"] = (
             df[f"{strength}_shot_attempts_against"] - df[f"{strength}_blocked_shots_for"]
         )
+
+    # Total shots (EV + PP + SH)
+    df["total_shots_on_goal_for"] = (
+        df["ev_shots_on_goal_for"] +
+        df["pp_shots_on_goal_for"] +
+        df["sh_shots_on_goal_for"]
+    )
+    df["total_shots_on_goal_against"] = (
+        df["ev_shots_on_goal_against"] +
+        df["pp_shots_on_goal_against"] +
+        df["sh_shots_on_goal_against"]
+    )
+    df["total_shot_attempts_for"] = (
+        df["ev_shot_attempts_for"] +
+        df["pp_shot_attempts_for"] +
+        df["sh_shot_attempts_for"]
+    )
+    df["total_shot_attempts_against"] = (
+        df["ev_shot_attempts_against"] +
+        df["pp_shot_attempts_against"] +
+        df["sh_shot_attempts_against"]
+    )
+    df["total_fenwick_for"] = (
+        df["ev_fenwick_for"] +
+        df["pp_fenwick_for"] +
+        df["sh_fenwick_for"]
+    )
+    df["total_fenwick_against"] = (
+        df["ev_fenwick_against"] +
+        df["pp_fenwick_against"] +
+        df["sh_fenwick_against"]
+    )
     return df
 
+def add_per60_rates(df):
+    """
+    Calculate per-60 rate stats at each strength.
+    These are normalized by TOI so they're not circular with TOI predictions.
+    """
+    for strength in ["ev", "pp", "sh"]:
+        toi_col = f"{strength}_toi"
+        toi_60 = df[toi_col] / 60  # convert minutes to per-60 denominator
+
+        # Avoid division by zero
+        toi_60 = toi_60.replace(0, np.nan)
+
+        for stat in ["shots_on_goal_for", "shots_on_goal_against",
+                     "shot_attempts_for", "shot_attempts_against",
+                     "goals_for", "goals_against",
+                     "hits_for", "hits_against",
+                     "giveaways", "takeaways"]:
+            col = f"{strength}_{stat}"
+            if col in df.columns:
+                df[f"{strength}_{stat}_per60"] = df[col] / toi_60
+
+        # Fenwick per 60
+        if f"{strength}_fenwick_for" in df.columns:
+            df[f"{strength}_fenwick_for_per60"] = df[f"{strength}_fenwick_for"] / toi_60
+            df[f"{strength}_fenwick_against_per60"] = df[f"{strength}_fenwick_against"] / toi_60
+
+    # Fill any remaining nulls from zero TOI games
+    per60_cols = [c for c in df.columns if c.endswith("_per60")]
+    df[per60_cols] = df[per60_cols].fillna(0)
+
+    return df
 
 # --- STEP 4: Calculate PP% and PK% ---
 def add_pp_pk(df):
@@ -319,9 +404,10 @@ def main():
     team_df[xg_cols] = team_df[xg_cols].fillna(0)
     print(f"  xG columns added: {xg_cols}")
 
-    # Step 3: add Fenwick
-    print("\nStep 3: Adding Fenwick...")
+    # Step 3: add Fenwick and per-60 rates
+    print("\nStep 3: Adding Fenwick and per-60 rates...")
     team_df = add_fenwick(team_df)
+    team_df = add_per60_rates(team_df)
 
     # Step 4: add PP%/PK%
     print("\nStep 4: Adding PP%/PK%...")

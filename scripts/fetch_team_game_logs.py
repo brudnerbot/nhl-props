@@ -63,6 +63,96 @@ def fetch_play_by_play(game_id):
     response.raise_for_status()
     return response.json()
 
+def calculate_strength_toi(plays, home_id):
+    """
+    Calculate time on ice at each strength state for both teams.
+    Returns dict with ev_toi, pp_toi, sh_toi for home and away.
+    """
+    # Initialize TOI counters (in seconds)
+    toi = {
+        "home": {"ev": 0, "pp": 0, "sh": 0, "en": 0},
+        "away": {"ev": 0, "pp": 0, "sh": 0, "en": 0},
+    }
+
+    # Filter to regulation + OT plays only, sorted by period and time
+    valid_plays = [p for p in plays if p.get("situationCode")]
+    valid_plays = sorted(valid_plays,
+                        key=lambda p: (p.get("periodDescriptor", {}).get("number", 0),
+                                      time_to_seconds(p.get("timeInPeriod", "0:00"))))
+
+    for i, play in enumerate(valid_plays):
+        situation = play.get("situationCode", "")
+        if len(situation) != 4:
+            continue
+
+        period = play.get("periodDescriptor", {}).get("number", 1)
+        period_type = play.get("periodDescriptor", {}).get("periodType", "REG")
+        current_time = time_to_seconds(play.get("timeInPeriod", "0:00"))
+
+        # Determine end time for this situation
+        if i < len(valid_plays) - 1:
+            next_play = valid_plays[i + 1]
+            next_period = next_play.get("periodDescriptor", {}).get("number", 1)
+            next_time = time_to_seconds(next_play.get("timeInPeriod", "0:00"))
+
+            if next_period == period:
+                elapsed = next_time - current_time
+            else:
+                # Fill to end of period
+                period_length = 300 if period > 3 else 1200
+                elapsed = period_length - current_time
+        else:
+            # Last play - fill to end of period
+            period_length = 300 if period > 3 else 1200
+            elapsed = period_length - current_time
+
+        if elapsed <= 0:
+            continue
+
+        # Parse situation code
+        away_goalie = situation[0]
+        away_skaters = int(situation[1])
+        home_skaters = int(situation[2])
+        home_goalie = situation[3]
+
+        home_en = home_goalie == "0"
+        away_en = away_goalie == "0"
+
+        # Classify strength for home team
+        if home_en or away_en:
+            toi["home"]["en"] += elapsed
+            toi["away"]["en"] += elapsed
+        elif home_skaters == away_skaters:
+            toi["home"]["ev"] += elapsed
+            toi["away"]["ev"] += elapsed
+        elif home_skaters > away_skaters:
+            toi["home"]["pp"] += elapsed
+            toi["away"]["sh"] += elapsed
+        else:
+            toi["home"]["sh"] += elapsed
+            toi["away"]["pp"] += elapsed
+
+    # Convert to minutes
+    return {
+        "home_ev_toi": round(toi["home"]["ev"] / 60, 2),
+        "home_pp_toi": round(toi["home"]["pp"] / 60, 2),
+        "home_sh_toi": round(toi["home"]["sh"] / 60, 2),
+        "home_en_toi": round(toi["home"]["en"] / 60, 2),
+        "away_ev_toi": round(toi["away"]["ev"] / 60, 2),
+        "away_pp_toi": round(toi["away"]["pp"] / 60, 2),
+        "away_sh_toi": round(toi["away"]["sh"] / 60, 2),
+        "away_en_toi": round(toi["away"]["en"] / 60, 2),
+    }
+
+
+def time_to_seconds(time_str):
+    """Convert MM:SS to seconds."""
+    try:
+        parts = time_str.split(":")
+        return int(parts[0]) * 60 + int(parts[1])
+    except:
+        return 0
+
 def parse_game(data):
     """Aggregate play-by-play events into team-level stats by strength."""
     game_id = data.get("id")
@@ -144,6 +234,9 @@ def parse_game(data):
             o["penalties_drawn"] += 1
 
     # Flatten into rows, one per team
+    # Calculate strength TOI
+    toi_data = calculate_strength_toi(data.get("plays", []), home_id)
+
     rows = []
     for side, team_abbrev, opp_abbrev in [
         ("home", home_abbrev, away_abbrev),
@@ -187,6 +280,12 @@ def parse_game(data):
             row[f"{prefix}penalties_taken"] = s["penalties_taken"]
             row[f"{prefix}penalties_drawn"] = s["penalties_drawn"]
             row[f"{prefix}penalty_minutes"] = s["penalty_minutes"]
+
+        # Add strength TOI
+        row["ev_toi"] = toi_data[f"{side}_ev_toi"]
+        row["pp_toi"] = toi_data[f"{side}_pp_toi"]
+        row["sh_toi"] = toi_data[f"{side}_sh_toi"]
+        row["en_toi"] = toi_data[f"{side}_en_toi"]
 
         rows.append(row)
     return rows
