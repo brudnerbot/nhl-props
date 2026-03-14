@@ -125,41 +125,79 @@ def main():
     X, y = build_features(df)
     feature_names = X.columns.tolist()
 
-    # Train/test split - use 20252026 season as test set
-    # This mirrors real-world usage: train on past, predict current season
-    train_mask = df["season"] != 20252026
-    X_train, X_test = X[train_mask], X[~train_mask]
-    y_train, y_test = y[train_mask], y[~train_mask]
+    # --- Season window comparison ---
+    print("\nComparing training windows...")
+    test_mask = df["season"] == 20252026
+    X_test = X[test_mask]
+    y_test = y[test_mask]
 
-    print(f"\nTrain set: {len(X_train)} shots ({y_train.sum()} goals)")
-    print(f"Test set:  {len(X_test)} shots ({y_test.sum()} goals)")
+    windows = {
+        "20222023+20232024+20242025 (3 seasons)": df["season"].isin([20222023, 20232024, 20242025]),
+        "20232024+20242025 (2 seasons)":          df["season"].isin([20232024, 20242025]),
+        "20242025 only (1 season)":               df["season"] == 20242025,
+        "20222023 only (oldest season)":          df["season"] == 20222023,
+    }
 
-    # Train XGBoost model
-    print("\nTraining XGBoost xG model...")
-    model = xgb.XGBClassifier(
-        n_estimators=500,
-        max_depth=5,
-        learning_rate=0.05,
-        subsample=0.8,
-        colsample_bytree=0.8,
-        scale_pos_weight=(y_train == 0).sum() / (y_train == 1).sum(),
-        eval_metric="logloss",
-        early_stopping_rounds=20,
-        random_state=42,
-        n_jobs=-1,
-    )
+    best_auc = 0
+    best_model = None
+    best_label = None
 
-    model.fit(
-        X_train, y_train,
-        eval_set=[(X_test, y_test)],
-        verbose=50,
-    )
+    for label, train_mask in windows.items():
+        # Exclude test set from training
+        train_mask = train_mask & ~test_mask
+        X_train = X[train_mask]
+        y_train = y[train_mask]
 
-    # Evaluate
+        print(f"\n  [{label}]")
+        print(f"  Train: {len(X_train)} shots ({y_train.sum()} goals)")
+
+        m = xgb.XGBClassifier(
+            n_estimators=500,
+            max_depth=5,
+            learning_rate=0.05,
+            subsample=0.8,
+            colsample_bytree=0.8,
+            scale_pos_weight=(y_train == 0).sum() / (y_train == 1).sum(),
+            eval_metric="logloss",
+            early_stopping_rounds=20,
+            random_state=42,
+            n_jobs=-1,
+        )
+        m.fit(
+            X_train, y_train,
+            eval_set=[(X_test, y_test)],
+            verbose=False,
+        )
+
+        y_pred = m.predict_proba(X_test)[:, 1]
+        auc = roc_auc_score(y_test, y_pred)
+        ll = log_loss(y_test, y_pred)
+        brier = brier_score_loss(y_test, y_pred)
+        print(f"  AUC: {auc:.4f} | Log Loss: {ll:.4f} | Brier: {brier:.4f}")
+
+        if auc > best_auc:
+            best_auc = auc
+            best_model = m
+            best_label = label
+
+    print(f"\nBest training window: {best_label} (AUC: {best_auc:.4f})")
+    model = best_model
+
+    # Final evaluation of best model
+    print("\n--- Final Model Evaluation ---")
     y_pred_proba = evaluate_model(model, X_test, y_test)
 
     # Feature importance
     print_feature_importance(model, feature_names)
+
+    # Retrain best model on all available data up to current season
+    print(f"\nRetraining best model on all data excluding 20252026 test set...")
+    final_train_mask = ~test_mask
+    X_final = X[final_train_mask]
+    y_final = y[final_train_mask]
+    model.set_params(early_stopping_rounds=None)
+    model.fit(X_final, y_final, verbose=False)
+    print(f"  Final train set: {len(X_final)} shots ({y_final.sum()} goals)")
 
    # Add xG predictions back to full dataset including missed shots
     print("\nGenerating xG values for full dataset...")

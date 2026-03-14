@@ -5,7 +5,7 @@ import os
 import math
 
 # --- CONFIG ---
-SEASONS = ["20232024", "20242025", "20252026"]
+SEASONS = ["20222023", "20232024", "20242025", "20252026"]
 OUTPUT_DIR = os.path.expanduser("~/nhl-props/data/raw")
 BASE_URL = "https://api-web.nhle.com/v1"
 
