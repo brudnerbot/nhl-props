@@ -11,7 +11,6 @@ OUTPUT_PATH = os.path.join(DATA_DIR, "processed/team_features.csv")
 
 ROLLING_WINDOWS = [5, 10, 20]
 
-# Stats to compute rolling averages for
 TEAM_STATS = [
     "goals_for", "goals_against",
     "ev_shots_on_goal_for", "ev_shots_on_goal_against",
@@ -32,14 +31,13 @@ TEAM_STATS = [
     "sh_blocked_shots_for", "sh_blocked_shots_against",
     "sh_goals_for", "sh_goals_against",
     "sh_penalties_taken", "sh_penalty_minutes",
-    # Totals across all strengths
+    # Totals
     "total_shots_on_goal_for", "total_shots_on_goal_against",
     "total_shot_attempts_for", "total_shot_attempts_against",
     "total_fenwick_for", "total_fenwick_against",
-    # TOI at each strength
-    # TOI at each strength
+    # TOI
     "ev_toi", "pp_toi", "sh_toi", "en_toi",
-    # Per-60 rate stats at each strength
+    # Per-60 rates
     "ev_shots_on_goal_for_per60", "ev_shots_on_goal_against_per60",
     "ev_shot_attempts_for_per60", "ev_shot_attempts_against_per60",
     "ev_goals_for_per60", "ev_goals_against_per60",
@@ -54,115 +52,122 @@ TEAM_STATS = [
     "sh_shot_attempts_for_per60", "sh_shot_attempts_against_per60",
     "sh_goals_for_per60", "sh_goals_against_per60",
     "sh_fenwick_for_per60", "sh_fenwick_against_per60",
+    # xG
+    "xgf_sog_total", "xga_sog_total",
 ]
 
 
-# --- STEP 1: Aggregate xG per game per team ---
 def aggregate_xg(shot_df):
-    """Aggregate shot-level xG into team-game-level totals by strength."""
+    """
+    Aggregate shot-level xG into team-game-level totals by strength.
+    Two metrics:
+    - xgf/xga: cumulative shot danger (all unblocked shots)
+    - xgf_sog/xga_sog: expected goals (shots on goal only) - scale ~2-4
+    """
     print("  Aggregating xG per team per game...")
-
-    # Exclude empty net shots from xG totals
     shot_df = shot_df[shot_df["is_empty_net"] == 0].copy()
 
-    # Aggregate xGF (shooting team) and xGA (defending team)
+    # Cumulative shot danger (all unblocked shots)
     xgf = shot_df.groupby(["game_id", "shooting_team", "strength"])["xg"].sum().reset_index()
     xgf.columns = ["game_id", "team", "strength", "xgf"]
-
     xga = shot_df.groupby(["game_id", "defending_team", "strength"])["xg"].sum().reset_index()
     xga.columns = ["game_id", "team", "strength", "xga"]
-
-    # Merge xGF and xGA
     xg = xgf.merge(xga, on=["game_id", "team", "strength"], how="outer").fillna(0)
-
-    # Pivot strength into columns
     xg_pivot = xg.pivot_table(
-        index=["game_id", "team"],
-        columns="strength",
-        values=["xgf", "xga"],
-        aggfunc="sum"
+        index=["game_id", "team"], columns="strength",
+        values=["xgf", "xga"], aggfunc="sum"
     ).fillna(0)
-
-    # Flatten column names
     xg_pivot.columns = [f"{stat}_{strength}" for stat, strength in xg_pivot.columns]
     xg_pivot = xg_pivot.reset_index()
-
-    # Add total xGF and xGA
     xgf_cols = [c for c in xg_pivot.columns if c.startswith("xgf_")]
     xga_cols = [c for c in xg_pivot.columns if c.startswith("xga_")]
     xg_pivot["xgf_total"] = xg_pivot[xgf_cols].sum(axis=1)
     xg_pivot["xga_total"] = xg_pivot[xga_cols].sum(axis=1)
 
-    print(f"  xG aggregated for {len(xg_pivot)} team-game rows")
-    return xg_pivot
+    # Expected goals (shots on goal only)
+    sog_df = shot_df[shot_df["is_on_goal"] == 1].copy()
+    xgf_sog = sog_df.groupby(["game_id", "shooting_team", "strength"])["xg"].sum().reset_index()
+    xgf_sog.columns = ["game_id", "team", "strength", "xgf_sog"]
+    xga_sog = sog_df.groupby(["game_id", "defending_team", "strength"])["xg"].sum().reset_index()
+    xga_sog.columns = ["game_id", "team", "strength", "xga_sog"]
+    xg_sog = xgf_sog.merge(xga_sog, on=["game_id", "team", "strength"], how="outer").fillna(0)
+    xg_sog_pivot = xg_sog.pivot_table(
+        index=["game_id", "team"], columns="strength",
+        values=["xgf_sog", "xga_sog"], aggfunc="sum"
+    ).fillna(0)
+    xg_sog_pivot.columns = [f"{stat}_{strength}" for stat, strength in xg_sog_pivot.columns]
+    xg_sog_pivot = xg_sog_pivot.reset_index()
+    xgf_sog_cols = [c for c in xg_sog_pivot.columns if c.startswith("xgf_sog_")]
+    xga_sog_cols = [c for c in xg_sog_pivot.columns if c.startswith("xga_sog_")]
+    xg_sog_pivot["xgf_sog_total"] = xg_sog_pivot[xgf_sog_cols].sum(axis=1)
+    xg_sog_pivot["xga_sog_total"] = xg_sog_pivot[xga_sog_cols].sum(axis=1)
+
+    result = xg_pivot.merge(xg_sog_pivot, on=["game_id", "team"], how="left").fillna(0)
+    print(f"  xG aggregated for {len(result)} team-game rows")
+    print(f"  CSD mean: {result['xgf_total'].mean():.2f}  "
+          f"xG (SOG only) mean: {result['xgf_sog_total'].mean():.2f}")
+    return result
 
 
-# --- STEP 2: Aggregate goalie stats per game ---
 def aggregate_goalie_stats(goalie_df):
     """
     For each game, get the primary goalie's stats and compute
     weighted save% and GSAx across multiple time windows.
     """
     print("  Processing goalie stats...")
-
     goalie_df = goalie_df.copy()
     goalie_df["date"] = pd.to_datetime(goalie_df["date"])
     goalie_df = goalie_df.sort_values(["player_id", "date"]).reset_index(drop=True)
 
-    # Calculate rolling goalie metrics
     results = []
     for player_id, g in goalie_df.groupby("player_id"):
         g = g.copy().reset_index(drop=True)
-
-        # GSAx = saves - (shots_against * league_avg_save_pct)
-        # We use save_pct as proxy since we don't have xGA per goalie yet
-        # Will be replaced with proper GSAx once goalie xG is built
-        g["gsax"] = g["saves"] - (g["shots_against"] * 0.906)  # 0.906 = NHL avg save pct
+        g["gsax"] = g["saves"] - (g["shots_against"] * 0.906)
 
         for i in range(len(g)):
             row = g.iloc[i].copy()
-            past = g.iloc[:i]  # all games before this one
+            past = g.iloc[:i]
 
-            # Rolling windows
             for window in [20, 40]:
                 past_w = past.tail(window)
                 if len(past_w) > 0:
                     total_shots = past_w["shots_against"].sum()
                     total_saves = past_w["saves"].sum()
-                    row[f"save_pct_last{window}"] = total_saves / total_shots if total_shots > 0 else None
+                    row[f"save_pct_last{window}"] = (
+                        total_saves / total_shots if total_shots > 0 else None
+                    )
                     row[f"gsax_per60_last{window}"] = (
-                        past_w["gsax"].sum() /
-                        (past_w["toi"].sum() / 60)
+                        past_w["gsax"].sum() / (past_w["toi"].sum() / 60)
                         if past_w["toi"].sum() > 0 else None
                     )
                 else:
                     row[f"save_pct_last{window}"] = None
                     row[f"gsax_per60_last{window}"] = None
 
-            # Current season save%
             current_season = row["season"]
             past_season = past[past["season"] == current_season]
             if len(past_season) > 0:
                 total_shots = past_season["shots_against"].sum()
                 total_saves = past_season["saves"].sum()
-                row["save_pct_current_season"] = total_saves / total_shots if total_shots > 0 else None
+                row["save_pct_current_season"] = (
+                    total_saves / total_shots if total_shots > 0 else None
+                )
                 row["gsax_per60_current_season"] = (
-                    past_season["gsax"].sum() /
-                    (past_season["toi"].sum() / 60)
+                    past_season["gsax"].sum() / (past_season["toi"].sum() / 60)
                     if past_season["toi"].sum() > 0 else None
                 )
             else:
                 row["save_pct_current_season"] = None
                 row["gsax_per60_current_season"] = None
 
-            # Multi-season save% (all available history)
             if len(past) > 0:
                 total_shots = past["shots_against"].sum()
                 total_saves = past["saves"].sum()
-                row["save_pct_career"] = total_saves / total_shots if total_shots > 0 else None
+                row["save_pct_career"] = (
+                    total_saves / total_shots if total_shots > 0 else None
+                )
                 row["gsax_per60_career"] = (
-                    past["gsax"].sum() /
-                    (past["toi"].sum() / 60)
+                    past["gsax"].sum() / (past["toi"].sum() / 60)
                     if past["toi"].sum() > 0 else None
                 )
             else:
@@ -173,7 +178,6 @@ def aggregate_goalie_stats(goalie_df):
 
     goalie_features = pd.DataFrame(results)
 
-    # For each game, get the primary goalie (most TOI)
     primary_goalies = goalie_features.sort_values("toi", ascending=False).drop_duplicates(
         subset=["game_id", "team"]
     )[["game_id", "team", "save_pct_last20", "save_pct_last40",
@@ -185,61 +189,44 @@ def aggregate_goalie_stats(goalie_df):
     return primary_goalies
 
 
-# --- STEP 3: Calculate Fenwick ---
 def add_fenwick(df):
-    """Fenwick = shot attempts - blocked shots (unblocked shot attempts)."""
+    """Fenwick = shot attempts - blocked shots."""
+    new_cols = {}
     for strength in ["ev", "pp", "sh"]:
-        df[f"{strength}_fenwick_for"] = (
+        new_cols[f"{strength}_fenwick_for"] = (
             df[f"{strength}_shot_attempts_for"] - df[f"{strength}_blocked_shots_against"]
         )
-        df[f"{strength}_fenwick_against"] = (
+        new_cols[f"{strength}_fenwick_against"] = (
             df[f"{strength}_shot_attempts_against"] - df[f"{strength}_blocked_shots_for"]
         )
 
-    # Total shots (EV + PP + SH)
-    df["total_shots_on_goal_for"] = (
-        df["ev_shots_on_goal_for"] +
-        df["pp_shots_on_goal_for"] +
-        df["sh_shots_on_goal_for"]
+    new_cols["total_shots_on_goal_for"] = (
+        df["ev_shots_on_goal_for"] + df["pp_shots_on_goal_for"] + df["sh_shots_on_goal_for"]
     )
-    df["total_shots_on_goal_against"] = (
-        df["ev_shots_on_goal_against"] +
-        df["pp_shots_on_goal_against"] +
-        df["sh_shots_on_goal_against"]
+    new_cols["total_shots_on_goal_against"] = (
+        df["ev_shots_on_goal_against"] + df["pp_shots_on_goal_against"] + df["sh_shots_on_goal_against"]
     )
-    df["total_shot_attempts_for"] = (
-        df["ev_shot_attempts_for"] +
-        df["pp_shot_attempts_for"] +
-        df["sh_shot_attempts_for"]
+    new_cols["total_shot_attempts_for"] = (
+        df["ev_shot_attempts_for"] + df["pp_shot_attempts_for"] + df["sh_shot_attempts_for"]
     )
-    df["total_shot_attempts_against"] = (
-        df["ev_shot_attempts_against"] +
-        df["pp_shot_attempts_against"] +
-        df["sh_shot_attempts_against"]
+    new_cols["total_shot_attempts_against"] = (
+        df["ev_shot_attempts_against"] + df["pp_shot_attempts_against"] + df["sh_shot_attempts_against"]
     )
-    df["total_fenwick_for"] = (
-        df["ev_fenwick_for"] +
-        df["pp_fenwick_for"] +
-        df["sh_fenwick_for"]
+    new_cols["total_fenwick_for"] = (
+        new_cols["ev_fenwick_for"] + new_cols["pp_fenwick_for"] + new_cols["sh_fenwick_for"]
     )
-    df["total_fenwick_against"] = (
-        df["ev_fenwick_against"] +
-        df["pp_fenwick_against"] +
-        df["sh_fenwick_against"]
+    new_cols["total_fenwick_against"] = (
+        new_cols["ev_fenwick_against"] + new_cols["pp_fenwick_against"] + new_cols["sh_fenwick_against"]
     )
-    return df
+    return pd.concat([df, pd.DataFrame(new_cols, index=df.index)], axis=1)
+
 
 def add_per60_rates(df):
-    """
-    Calculate per-60 rate stats at each strength.
-    Uses pd.concat to avoid DataFrame fragmentation warnings.
-    """
+    """Calculate per-60 rate stats at each strength."""
     new_cols = {}
-
     for strength in ["ev", "pp", "sh"]:
         toi_col = f"{strength}_toi"
         toi_60 = (df[toi_col] / 60).replace(0, np.nan)
-
         for stat in ["shots_on_goal_for", "shots_on_goal_against",
                      "shot_attempts_for", "shot_attempts_against",
                      "goals_for", "goals_against",
@@ -248,7 +235,6 @@ def add_per60_rates(df):
             col = f"{strength}_{stat}"
             if col in df.columns:
                 new_cols[f"{strength}_{stat}_per60"] = df[col] / toi_60
-
         if f"{strength}_fenwick_for" in df.columns:
             new_cols[f"{strength}_fenwick_for_per60"] = df[f"{strength}_fenwick_for"] / toi_60
             new_cols[f"{strength}_fenwick_against_per60"] = df[f"{strength}_fenwick_against"] / toi_60
@@ -258,13 +244,7 @@ def add_per60_rates(df):
     new_df[per60_cols] = new_df[per60_cols].fillna(0)
     return new_df
 
-    # Fill any remaining nulls from zero TOI games
-    per60_cols = [c for c in df.columns if c.endswith("_per60")]
-    df[per60_cols] = df[per60_cols].fillna(0)
 
-    return df
-
-# --- STEP 4: Calculate PP% and PK% ---
 def add_pp_pk(df):
     """Add power play % and penalty kill %."""
     new_cols = {
@@ -274,17 +254,11 @@ def add_pp_pk(df):
     return pd.concat([df, pd.DataFrame(new_cols, index=df.index)], axis=1)
 
 
-# --- STEP 5: Rolling averages with opponent adjustment ---
 def add_rolling_features(df):
-    """
-    For each team, compute rolling averages over last 5, 10, 20 games.
-    Also compute opponent-adjusted versions by comparing to opponent's
-    season average against all other teams.
-    """
+    """Compute rolling averages over last 5, 10, 20 games with opponent adjustment."""
     print("  Computing rolling averages...")
     df = df.sort_values(["team", "date"]).reset_index(drop=True)
 
-    # Compute season averages per team (used for opponent adjustment)
     season_avgs = df.groupby(["team", "season"])[TEAM_STATS].mean().reset_index()
     season_avgs.columns = ["team", "season"] + [f"season_avg_{c}" for c in TEAM_STATS]
 
@@ -296,14 +270,12 @@ def add_rolling_features(df):
             row = team_df.iloc[i].copy()
             past = team_df.iloc[:i]
 
-            # Rolling windows
             for window in ROLLING_WINDOWS:
                 past_w = past.tail(window)
                 for stat in TEAM_STATS:
                     col = f"{stat}_last{window}"
                     row[col] = past_w[stat].mean() if len(past_w) > 0 else None
 
-                # Opponent adjustment
                 if len(past_w) > 0:
                     opp_adjustments = []
                     for _, game in past_w.iterrows():
@@ -315,7 +287,6 @@ def add_rolling_features(df):
                         ]
                         if len(opp_avg) > 0:
                             opp_adjustments.append(opp_avg.iloc[0].to_dict())
-
                     if opp_adjustments:
                         opp_df = pd.DataFrame(opp_adjustments)
                         for stat in ["ev_shots_on_goal_against", "ev_shot_attempts_against",
@@ -323,11 +294,9 @@ def add_rolling_features(df):
                             opp_col = f"season_avg_{stat}"
                             if opp_col in opp_df.columns:
                                 row[f"{stat}_opp_adj_last{window}"] = (
-                                    row[f"{stat}_last{window}"] -
-                                    opp_df[opp_col].mean()
+                                    row[f"{stat}_last{window}"] - opp_df[opp_col].mean()
                                 )
 
-            # Current season average
             current_season = row["season"]
             season_past = past[past["season"] == current_season]
             for stat in TEAM_STATS:
@@ -335,16 +304,14 @@ def add_rolling_features(df):
                     season_past[stat].mean() if len(season_past) > 0 else None
                 )
 
-            # Rest days
             if i > 0:
                 prev_date = pd.to_datetime(team_df.iloc[i - 1]["date"])
                 curr_date = pd.to_datetime(row["date"])
                 row["days_rest"] = (curr_date - prev_date).days
             else:
-                row["days_rest"] = 3  # default for first game
+                row["days_rest"] = 3
 
             row["is_back_to_back"] = int(row["days_rest"] == 1)
-
             all_rows.append(row)
 
     result = pd.DataFrame(all_rows)
@@ -352,7 +319,65 @@ def add_rolling_features(df):
     return result
 
 
-# --- STEP 6: Build matchup features ---
+def add_weighted_pp_sh_rates(df):
+    """
+    Calculate weighted multi-season PP and SH shots per 60.
+    Weights: current season 50%, last season 35%, two seasons ago 15%.
+    """
+    print("  Computing weighted PP/SH rate stats...")
+
+    SEASONS = sorted(df["season"].unique())
+    WEIGHTS = {0: 0.50, -1: 0.35, -2: 0.15}
+
+    stats_to_weight = [
+        "pp_shots_on_goal_for_per60", "pp_shots_on_goal_against_per60",
+        "sh_shots_on_goal_for_per60", "sh_shots_on_goal_against_per60",
+        "pp_fenwick_for_per60", "pp_fenwick_against_per60",
+        "sh_fenwick_for_per60", "sh_fenwick_against_per60",
+        "pp_shot_attempts_for_per60", "pp_shot_attempts_against_per60",
+        "sh_shot_attempts_for_per60", "sh_shot_attempts_against_per60",
+        "pp_goals_for_per60", "pp_goals_against_per60",
+        "sh_goals_for_per60", "sh_goals_against_per60",
+    ]
+
+    results = []
+    for team, team_df in df.groupby("team"):
+        team_df = team_df.sort_values("date").reset_index(drop=True)
+
+        for i in range(len(team_df)):
+            row = team_df.iloc[i].copy()
+            current_season = row["season"]
+            season_idx = list(SEASONS).index(current_season) if current_season in SEASONS else -1
+
+            for stat in stats_to_weight:
+                if stat not in team_df.columns:
+                    continue
+                weighted_sum = 0.0
+                weight_total = 0.0
+                for offset, weight in WEIGHTS.items():
+                    target_season_idx = season_idx + offset
+                    if target_season_idx < 0 or target_season_idx >= len(SEASONS):
+                        continue
+                    target_season = SEASONS[target_season_idx]
+                    past_season_games = team_df[
+                        (team_df["season"] == target_season) &
+                        (team_df["date"] < row["date"])
+                    ]
+                    if len(past_season_games) >= 5:
+                        season_avg = past_season_games[stat].mean()
+                        if not np.isnan(season_avg):
+                            weighted_sum += season_avg * weight
+                            weight_total += weight
+                row[f"weighted_{stat}"] = weighted_sum / weight_total if weight_total > 0 else None
+
+            results.append(row)
+
+    result_df = pd.DataFrame(results)
+    weighted_cols = [c for c in result_df.columns if c.startswith("weighted_")]
+    print(f"  Added {len(weighted_cols)} weighted rate columns")
+    return result_df
+
+
 def build_matchup_features(df):
     """
     Combine home and away team features into a single matchup row.
@@ -363,7 +388,6 @@ def build_matchup_features(df):
     home = df[df["is_home"] == True].copy()
     away = df[df["is_home"] == False].copy()
 
-    # Rename columns with home_ and away_ prefix
     feature_cols = [c for c in df.columns if c not in
                     ["game_id", "season", "date", "team", "opponent",
                      "is_home", "went_to_ot", "won"]]
@@ -381,81 +405,16 @@ def build_matchup_features(df):
     matchup = home_renamed.merge(away_renamed, on="game_id", how="inner")
     matchup = matchup.sort_values("date").reset_index(drop=True)
 
+    # Verify goalie columns made it through
+    goalie_check = [c for c in matchup.columns if "save_pct" in c]
+    if not goalie_check:
+        print("  WARNING: Goalie columns missing from matchup features!")
+    else:
+        print(f"  Goalie columns included: {len(goalie_check)}")
+
     print(f"  Matchup features built: {len(matchup)} games")
     return matchup
 
-def add_weighted_pp_sh_rates(df):
-    """
-    Calculate weighted multi-season PP and SH shots per 60 for each team.
-    Weights: current season 50%, last season 35%, two seasons ago 15%.
-    These stable rates are used in predict_game.py instead of noisy per-game predictions.
-    """
-    print("  Computing weighted PP/SH rate stats...")
-
-    SEASONS = sorted(df["season"].unique())
-    WEIGHTS = {0: 0.50, -1: 0.35, -2: 0.15}  # 0=current, -1=last, -2=two ago
-
-    results = []
-
-    for team, team_df in df.groupby("team"):
-        team_df = team_df.sort_values("date").reset_index(drop=True)
-
-        for i in range(len(team_df)):
-            row = team_df.iloc[i].copy()
-            current_season = row["season"]
-            season_idx = list(SEASONS).index(current_season) if current_season in SEASONS else -1
-
-            weighted_stats = {}
-            stats_to_weight = [
-                "pp_shots_on_goal_for_per60", "pp_shots_on_goal_against_per60",
-                "sh_shots_on_goal_for_per60", "sh_shots_on_goal_against_per60",
-                "pp_fenwick_for_per60", "pp_fenwick_against_per60",
-                "sh_fenwick_for_per60", "sh_fenwick_against_per60",
-                "pp_shot_attempts_for_per60", "pp_shot_attempts_against_per60",
-                "sh_shot_attempts_for_per60", "sh_shot_attempts_against_per60",
-                "pp_goals_for_per60", "pp_goals_against_per60",
-                "sh_goals_for_per60", "sh_goals_against_per60",
-            ]
-
-            for stat in stats_to_weight:
-                if stat not in team_df.columns:
-                    continue
-
-                weighted_sum = 0.0
-                weight_total = 0.0
-
-                for offset, weight in WEIGHTS.items():
-                    target_season_idx = season_idx + offset
-                    if target_season_idx < 0 or target_season_idx >= len(SEASONS):
-                        continue
-                    target_season = SEASONS[target_season_idx]
-
-                    # Get all games from that season BEFORE current date
-                    past_season_games = team_df[
-                        (team_df["season"] == target_season) &
-                        (team_df["date"] < row["date"])
-                    ]
-
-                    if len(past_season_games) >= 5:  # need at least 5 games
-                        season_avg = past_season_games[stat].mean()
-                        if not np.isnan(season_avg):
-                            weighted_sum += season_avg * weight
-                            weight_total += weight
-
-                if weight_total > 0:
-                    weighted_stats[f"weighted_{stat}"] = weighted_sum / weight_total
-                else:
-                    weighted_stats[f"weighted_{stat}"] = None
-
-            for k, v in weighted_stats.items():
-                row[k] = v
-
-            results.append(row)
-
-    result_df = pd.DataFrame(results)
-    weighted_cols = [c for c in result_df.columns if c.startswith("weighted_")]
-    print(f"  Added {len(weighted_cols)} weighted rate columns")
-    return result_df
 
 def main():
     print("Loading data...")
@@ -468,42 +427,40 @@ def main():
 
     team_df["date"] = pd.to_datetime(team_df["date"])
 
-    # Step 1: aggregate xG
     print("\nStep 1: Aggregating xG...")
     xg_features = aggregate_xg(shot_df)
 
-    # Step 2: merge xG into team logs
     print("\nStep 2: Merging xG into team logs...")
     team_df = team_df.merge(xg_features, on=["game_id", "team"], how="left")
     xg_cols = [c for c in xg_features.columns if c not in ["game_id", "team"]]
     team_df[xg_cols] = team_df[xg_cols].fillna(0)
     print(f"  xG columns added: {xg_cols}")
 
-    # Step 3: add Fenwick and per-60 rates
     print("\nStep 3: Adding Fenwick and per-60 rates...")
     team_df = add_fenwick(team_df)
     team_df = add_per60_rates(team_df)
 
-    # Step 4: add PP%/PK%
     print("\nStep 4: Adding PP%/PK%...")
     team_df = add_pp_pk(team_df)
 
-    # Step 5: rolling averages with opponent adjustment
     print("\nStep 5: Computing rolling averages...")
     team_df = add_rolling_features(team_df)
 
-    # Step 6: weighted PP/SH rate stats
     print("\nStep 6: Computing weighted PP/SH rate stats...")
     team_df = add_weighted_pp_sh_rates(team_df)
 
-    # Step 7: goalie features
     print("\nStep 7: Computing goalie features...")
+    goalie_features = aggregate_goalie_stats(goalie_df)
+    team_df = team_df.merge(goalie_features, on=["game_id", "team"], how="left")
+    goalie_cols = ["save_pct_last20", "save_pct_last40", "save_pct_current_season",
+                   "save_pct_career", "gsax_per60_last20", "gsax_per60_last40",
+                   "gsax_per60_current_season", "gsax_per60_career"]
+    print(f"  Goalie cols after merge: {[c for c in goalie_cols if c in team_df.columns]}")
+    print(f"  Goalie null count: {team_df['save_pct_last20'].isnull().sum()}")
 
-    # Step 8: build matchup features
     print("\nStep 8: Building matchup features...")
     matchup_df = build_matchup_features(team_df)
 
-    # Save
     os.makedirs(os.path.dirname(OUTPUT_PATH), exist_ok=True)
     matchup_df.to_csv(OUTPUT_PATH, index=False)
     print(f"\nDone! {len(matchup_df)} matchup rows saved to {OUTPUT_PATH}")

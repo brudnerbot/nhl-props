@@ -19,7 +19,7 @@ TARGETS = [
     # Total goals (Poisson - small counts)
     ("home_goals_for",                      "regression"),
     ("away_goals_for",                      "regression"),
-    # Per-60 shot rates at each strength (rate stats, not circular with TOI)
+    # Per-60 shot rates at each strength (rolling avg features, not raw game stats)
     ("home_ev_shots_on_goal_for_per60",     "regression"),
     ("away_ev_shots_on_goal_for_per60",     "regression"),
     ("home_pp_shots_on_goal_for_per60",     "regression"),
@@ -34,9 +34,11 @@ TARGETS = [
     # Per-60 shot attempts (Corsi)
     ("home_ev_shot_attempts_for_per60",     "regression"),
     ("away_ev_shot_attempts_for_per60",     "regression"),
-    # xG total
+    # xG totals
     ("home_xgf_total",                      "regression"),
     ("away_xgf_total",                      "regression"),
+    ("home_xgf_sog_total",                  "regression"),
+    ("away_xgf_sog_total",                  "regression"),
     # Strength TOI
     ("home_ev_toi",                         "regression"),
     ("away_ev_toi",                         "regression"),
@@ -46,11 +48,14 @@ TARGETS = [
     ("home_won",                            "classifier"),
 ]
 
-# Features to exclude from training (metadata and raw game outcomes)
+# All raw single-game stats to exclude — use rolling averages instead
+# These cause data leakage from the most recent game
 EXCLUDE_COLS = [
+    # Metadata
     "game_id", "season", "date", "home_team", "away_team",
     "home_won", "went_to_ot",
-    # Raw game outcomes - data leakage
+
+    # Raw game outcomes (targets + leakage)
     "home_goals_for", "home_goals_against",
     "away_goals_for", "away_goals_against",
     "home_ev_goals_for", "home_ev_goals_against",
@@ -59,6 +64,8 @@ EXCLUDE_COLS = [
     "away_pp_goals_for", "away_pp_goals_against",
     "home_sh_goals_for", "home_sh_goals_against",
     "away_sh_goals_for", "away_sh_goals_against",
+
+    # Raw shot counts
     "home_ev_shots_on_goal_for", "home_ev_shots_on_goal_against",
     "away_ev_shots_on_goal_for", "away_ev_shots_on_goal_against",
     "home_pp_shots_on_goal_for", "home_pp_shots_on_goal_against",
@@ -67,6 +74,8 @@ EXCLUDE_COLS = [
     "away_sh_shots_on_goal_for", "away_sh_shots_on_goal_against",
     "home_total_shots_on_goal_for", "home_total_shots_on_goal_against",
     "away_total_shots_on_goal_for", "away_total_shots_on_goal_against",
+
+    # Raw shot attempts
     "home_ev_shot_attempts_for", "home_ev_shot_attempts_against",
     "away_ev_shot_attempts_for", "away_ev_shot_attempts_against",
     "home_pp_shot_attempts_for", "home_pp_shot_attempts_against",
@@ -75,6 +84,8 @@ EXCLUDE_COLS = [
     "away_sh_shot_attempts_for", "away_sh_shot_attempts_against",
     "home_total_shot_attempts_for", "home_total_shot_attempts_against",
     "away_total_shot_attempts_for", "away_total_shot_attempts_against",
+
+    # Raw Fenwick
     "home_ev_fenwick_for", "home_ev_fenwick_against",
     "away_ev_fenwick_for", "away_ev_fenwick_against",
     "home_pp_fenwick_for", "home_pp_fenwick_against",
@@ -83,6 +94,8 @@ EXCLUDE_COLS = [
     "away_sh_fenwick_for", "away_sh_fenwick_against",
     "home_total_fenwick_for", "home_total_fenwick_against",
     "away_total_fenwick_for", "away_total_fenwick_against",
+
+    # Raw xG
     "home_xgf_total", "home_xga_total",
     "away_xgf_total", "away_xga_total",
     "home_xgf_ev", "home_xga_ev",
@@ -91,8 +104,20 @@ EXCLUDE_COLS = [
     "away_xgf_pp", "away_xga_pp",
     "home_xgf_sh", "home_xga_sh",
     "away_xgf_sh", "away_xga_sh",
+    "home_xgf_sog_total", "home_xga_sog_total",
+    "away_xgf_sog_total", "away_xga_sog_total",
+    "home_xgf_sog_ev", "home_xga_sog_ev",
+    "away_xgf_sog_ev", "away_xga_sog_ev",
+    "home_xgf_sog_pp", "home_xga_sog_pp",
+    "away_xgf_sog_pp", "away_xga_sog_pp",
+    "home_xgf_sog_sh", "home_xga_sog_sh",
+    "away_xgf_sog_sh", "away_xga_sog_sh",
+
+    # Raw TOI (use rolling avgs instead)
     "home_ev_toi", "home_pp_toi", "home_sh_toi", "home_en_toi",
     "away_ev_toi", "away_pp_toi", "away_sh_toi", "away_en_toi",
+
+    # Raw hits, giveaways, faceoffs (single game too noisy)
     "home_ev_hits_for", "home_ev_hits_against",
     "away_ev_hits_for", "away_ev_hits_against",
     "home_ev_giveaways", "home_ev_takeaways",
@@ -123,6 +148,8 @@ EXCLUDE_COLS = [
     "away_sh_giveaways", "away_sh_takeaways",
     "home_sh_faceoffs_won", "home_sh_faceoffs_taken",
     "away_sh_faceoffs_won", "away_sh_faceoffs_taken",
+
+    # Raw penalties
     "home_ev_penalties_taken", "away_ev_penalties_taken",
     "home_ev_penalties_drawn", "away_ev_penalties_drawn",
     "home_ev_penalty_minutes", "away_ev_penalty_minutes",
@@ -132,9 +159,12 @@ EXCLUDE_COLS = [
     "home_sh_penalties_taken", "away_sh_penalties_taken",
     "home_sh_penalties_drawn", "away_sh_penalties_drawn",
     "home_sh_penalty_minutes", "away_sh_penalty_minutes",
+
+    # Raw PP%/PK% (single game too noisy)
     "home_pp_pct", "away_pp_pct",
     "home_pk_pct", "away_pk_pct",
-    # Per-60 raw game outcomes - data leakage
+
+    # Raw single-game per-60 stats (too noisy - leakage from most recent game)
     "home_ev_shots_on_goal_for_per60", "home_ev_shots_on_goal_against_per60",
     "away_ev_shots_on_goal_for_per60", "away_ev_shots_on_goal_against_per60",
     "home_pp_shots_on_goal_for_per60", "home_pp_shots_on_goal_against_per60",
@@ -177,7 +207,7 @@ def load_data(path):
 
 
 def get_feature_cols(df):
-    """Get all valid feature columns (exclude metadata and targets)."""
+    """Get all valid feature columns (exclude metadata and raw game stats)."""
     exclude = set(EXCLUDE_COLS)
     feature_cols = [c for c in df.columns if c not in exclude]
     return feature_cols
@@ -282,12 +312,7 @@ def evaluate_classifier(y_true, y_pred_proba, target_name):
 
 
 def predict_with_distribution(model, X, model_type, target_name):
-    """
-    Generate point prediction and probability distribution.
-    Goals: Poisson distribution.
-    Everything else: Normal distribution with sigma from training residuals.
-    Classifier: raw probability.
-    """
+    """Generate point prediction and probability distribution."""
     poisson_targets = {"home_goals_for", "away_goals_for"}
 
     if model_type == "classifier":
@@ -364,23 +389,18 @@ def print_sample_prediction(model, X_sample, model_type, target_name):
 
 
 def main():
-    # Load data
     df = load_data(DATA_PATH)
 
-    # Train/test split — use 20252026 as test
     train_df = df[df["season"] != 20252026].copy()
     test_df = df[df["season"] == 20252026].copy()
     print(f"\nTrain: {len(train_df)} games | Test: {len(test_df)} games")
 
-    # Get feature columns
     feature_cols = get_feature_cols(df)
     print(f"Total features available: {len(feature_cols)}")
 
-    # Prepare full feature matrices
     X_train_full = prepare_features(train_df, feature_cols)
     X_test_full = prepare_features(test_df, feature_cols)
 
-    # Store all trained models and results
     all_models = {}
     all_features = {}
     results = {}
@@ -399,22 +419,18 @@ def main():
         y_train = train_df[target_name].fillna(0)
         y_test = test_df[target_name].fillna(0)
 
-        # Feature selection on training data only
         print(f"  Selecting top features...")
         top_features = select_features(X_train_full, y_train, model_type, n_features=80)
         X_train = X_train_full[top_features]
         X_test = X_test_full[top_features]
 
-        # Validation split for early stopping
         val_split = int(len(X_train) * 0.8)
         X_tr, X_val = X_train.iloc[:val_split], X_train.iloc[val_split:]
         y_tr, y_val = y_train.iloc[:val_split], y_train.iloc[val_split:]
 
-        # Train
         print(f"  Training on {len(X_tr)} games, validating on {len(X_val)}...")
         model = train_model(X_tr, y_tr, X_val, y_val, model_type, target_name)
 
-        # Evaluate on test set
         if model_type == "classifier":
             y_pred = model.predict_proba(X_test)[:, 1]
             evaluate_classifier(y_test, y_pred, target_name)
@@ -422,11 +438,9 @@ def main():
             y_pred = model.predict(X_test)
             evaluate_regression(y_test, y_pred, target_name)
 
-        # Sample prediction
         print(f"  Sample prediction (first test game):")
         print_sample_prediction(model, X_test.iloc[[0]], model_type, target_name)
 
-        # Store
         all_models[target_name] = model
         all_features[target_name] = top_features
         results[target_name] = {
@@ -436,7 +450,6 @@ def main():
             "test_auc": roc_auc_score(y_test, y_pred) if model_type == "classifier" else None,
         }
 
-    # Save models
     print("\n" + "="*60)
     print("SAVING MODELS")
     print("="*60)
@@ -456,7 +469,6 @@ def main():
     print(f"  Saved: feature_lists.pkl")
     print(f"  Saved: residual_stds.pkl")
 
-    # Summary
     print("\n" + "="*60)
     print("SUMMARY")
     print("="*60)
