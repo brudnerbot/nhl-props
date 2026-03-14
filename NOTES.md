@@ -13,8 +13,8 @@
 Build a full NHL analytics and props betting model system in 5 phases:
 
 1. **Phase 1 - Data Pipeline** ✅ COMPLETE
-2. **Phase 2 - Team Game Model** 🔲 IN PROGRESS
-3. **Phase 3 - Player Game Model** 🔲
+2. **Phase 2 - Team Game Model** ✅ COMPLETE
+3. **Phase 3 - Player Game Model** 🔲 NEXT
 4. **Phase 4 - Goalie Model** 🔲
 5. **Phase 5 - Season Projection Model** 🔲 (target: end of July)
 
@@ -22,138 +22,143 @@ Build a full NHL analytics and props betting model system in 5 phases:
 
 ## Current Status
 - ✅ All raw data pulled and verified
-- ✅ xG model built (AUC 0.7807)
-- ✅ Team features processed (3,666 matchups, 895 features)
-- ✅ Team model built (win prob AUC 0.6971, goals MAE 1.349)
-- ✅ Fixed PP/SH shot prediction — use weighted multi-season rates × predicted TOI
-- ✅ Fixed DataFrame fragmentation warnings in process_team_features.py
-- ✅ Added weighted PP/SH rate columns (50% current, 35% last, 15% two seasons ago)
-- 🔲 Build predict_game.py output script — NEXT
-- 🔲 Build player model
+- ✅ xG model built, calibrated, empty net model added (AUC 0.7610)
+- ✅ Team features processed (3,666 matchups, 959 features)
+- ✅ Team model built and validated (win prob AUC 0.7079)
+- ✅ predict_game.py working — outputs win prob, goals, shots, xG, TOI
+- 🔲 Build player game model (next)
 - 🔲 Build goalie model
-- 🔲 Build season projection model
+- 🔲 Build season projection model (by July)
 
 ---
 
-## Phase Details
+## How To Run A Game Prediction
+```bash
+cd ~/nhl-props
+source venv/bin/activate
+python scripts/predict_game.py HOME_TEAM AWAY_TEAM [DATE]
+# Example:
+python scripts/predict_game.py EDM VAN
+python scripts/predict_game.py TOR BOS 2026-03-20
+```
 
-### Phase 2 - Team Game Model
-Predict team event outcomes for each game as a direct matchup.
-Each training row = one game with both teams' features combined.
+## How To Update Data Daily
+```bash
+cd ~/nhl-props
+source venv/bin/activate
+python scripts/update_data.py --days 1   # yesterday only
+python scripts/update_data.py --days 7   # last week
+```
 
-**Current Model Performance (test set = 20252026 season):**
+## How To Rebuild Everything From Scratch
+```bash
+python scripts/fetch_team_game_logs.py      # ~30-45 min
+python scripts/fetch_player_game_logs.py    # ~45-60 min
+python scripts/fetch_goalie_game_logs.py    # ~5-10 min
+python scripts/fetch_shot_data.py           # ~30-45 min
+python scripts/build_xg_model.py            # ~5 min
+python scripts/process_team_features.py     # ~5 min
+python scripts/build_team_model.py          # ~10 min
+```
+
+---
+
+## Phase 2 - Team Model (COMPLETE)
+
+### Model Performance (test set = 20252026 season)
 | Target | MAE / AUC | Notes |
 |---|---|---|
-| home_goals_for | MAE 1.349 | Good, hockey goals are random |
-| away_goals_for | MAE 1.316 | Good |
-| home_ev_shots_on_goal_for_per60 | MAE 5.318 | Reasonable |
-| away_ev_shots_on_goal_for_per60 | MAE 5.189 | Reasonable |
-| home_pp_shots_on_goal_for_per60 | MAE 23.614 | Too noisy - fix needed |
-| away_pp_shots_on_goal_for_per60 | MAE 26.082 | Too noisy - fix needed |
-| home_sh_shots_on_goal_for_per60 | MAE 7.516 | Noisy |
-| home_ev_fenwick_for_per60 | MAE 8.124 | Reasonable |
-| home_pp_fenwick_for_per60 | MAE 41.914 | Too noisy - fix needed |
-| home_xgf_total | MAE 2.885 | Good |
-| home_ev_toi | MAE 2.433 | Good |
-| home_pp_toi | MAE 0.856 | Good |
-| away_pp_toi | MAE 0.782 | Good |
-| home_won | AUC 0.6971 | Excellent - matches MoneyPuck |
+| home_goals_for | MAE 1.353 | Goals are random — this is near ceiling |
+| away_goals_for | MAE 1.317 | Good |
+| home_ev_shots_on_goal_for_per60 | MAE 5.386 | Reasonable |
+| home_ev_fenwick_for_per60 | MAE 8.174 | Reasonable |
+| home_xgf_total | MAE 0.918 | Good (scale ~4-5) |
+| home_xgf_sog_total | MAE 0.772 | Good (scale ~3) |
+| home_ev_toi | MAE 2.429 | Good |
+| home_pp_toi | MAE 0.852 | Good |
+| home_won | AUC 0.7079 | Solid — comparable to public models |
 
-**Known Issues / Next Fixes:**
-- PP and SH per-60 shots are too noisy on a per-game basis
-- Fix: predict PP TOI (already working) × season avg PP shots per 60 = total PP shots
-- Need a prediction output script that converts per-60 rates × TOI into total shots
-- PerformanceWarning in process_team_features.py (harmless, fix with pd.concat)
+### Key Design Decisions
+- Model the matchup directly (not each team independently)
+- Exclude all raw single-game stats as features — use rolling averages only
+  (raw per-60 from last game causes data leakage)
+- Use rolling windows: last 5, 10, 20 games + season average
+- Opponent-adjusted rolling averages for shots and goals
+- Weighted multi-season PP/SH rates (50% current, 35% last, 15% two ago)
+- Total shots = EV shots/60 × EV TOI + weighted PP shots/60 × PP TOI + weighted SH shots/60 × SH TOI
+- SH TOI enforced = opponent PP TOI (they must be equal)
+- Goalie features: save% and GSAx per 60 over last 20, 40 games, season, career
 
-**Output approach (total shots):**
-1. Predict EV shots per 60 → multiply by predicted EV TOI → EV shots
-2. Use season avg PP shots per 60 → multiply by predicted PP TOI → PP shots
-3. Use season avg SH shots per 60 → multiply by predicted SH TOI → SH shots
-4. Sum for total shots on goal
-5. Apply Normal distribution around total for probability thresholds
-
-**Key features used:**
-- Rolling averages last 5, 10, 20 games (opponent-adjusted)
-- Current season averages
-- Per-60 rate stats at each strength (EV/PP/SH)
-- TOI at each strength
-- xG for/against (total + by strength)
-- Fenwick for/against per 60
-- Goalie save% and GSAx (last 20, 40 games, season, career)
-- Home/away flag, days rest, back-to-back flag
-
-**Overfitting protection:**
-- Feature selection: top 80 features from 670 available
-- XGBoost early stopping (30 rounds)
-- Validation split: last 20% of training data
-
-### Phase 3 - Player Game Model
-Predict every player's performance for each game.
-- **Predicts:** goals, assists, points, shots, hits, blocks, PIM, faceoffs, TOI, PPP, SHP
-- **Output:** probability distribution + most likely outcome + props thresholds
-- **Features:** player rolling averages, TOI deployment, linemate quality,
-  opponent defensive stats, team context, goalie quality
-- **Regression to mean:** shooting % stabilization over 5+ seasons
-- **Training data:** 20192020 onward for regression baselines
-- **Validation:** test on 20252026 games already played
-
-### Phase 4 - Goalie Model
-Predict goalie saves and save percentage per game.
-- **Input:** projected shots against from Phase 2 + goalie performance history
-- **Features:** recent save%, career save%, GSAx, rest days, opponent xG
-- **Output:** probability distribution + most likely outcome
-
-### Phase 5 - Season Projection Model (by July)
-Per-60 projections for every player using the framework:
-1. Shot attempts per 60 → shots on goal per 60 → goals per 60
-2. On-ice shots for (team factor) → on-ice goals → IPP → assists per 60
-3. Hits, blocks, PIM, faceoffs per 60
-4. TOI per game at each strength + GP projection
-Manual TOI override capability built in.
+### predict_game.py Output
+- Win probability (home and away)
+- Goals: Poisson distribution + P(over 0.5/1.5/2.5/3.5/4.5)
+- Total shots: EV+PP+SH breakdown + Normal distribution + P(over thresholds)
+- xG: Normal distribution + P(over 1.5/2.5/3.5/4.5/5.5)
+- Strength TOI: EV, PP, SH minutes for each team
 
 ---
 
-## Expected Goals (xG) Model
+## xG Model
 
-### What is xG?
-Expected goals (xG) = probability a shot results in a goal based on shot
-characteristics, independent of goaltending or shooting luck.
+### Two xG metrics
+1. **Cumulative Shot Danger (CSD)** — sum of xG across all unblocked shots
+   (shots on goal + missed shots). Scale ~4-5 per team per game.
+   Used as a feature in team/player models.
+2. **xG SOG** — sum of xG for shots on goal only. Scale ~3 per team per game.
+   Closer to traditional xG. Used as model target and output.
 
-### How Our Model Works
-Trained on ~150,000 shots on goal + goals from 20232024 and 20242025 seasons.
-Applied to missed shots too (missed shot = real scoring opportunity, shooter missed net).
-Blocked shots excluded (shot was altered before reaching goalie).
+### Empty Net Model
+Separate logistic regression model for empty net shots.
+Features: distance, angle, shot type, is_rebound, speed_from_prev, period.
+AUC 0.7226, calibrated mean 0.128 vs actual 0.129.
 
-### Variables
-1. Shot distance from net
-2. Shot angle from net centerline
-3. Shot type (wrist, slap, snap, tip-in, backhand, deflected, wrap-around)
-4. Is rebound (previous shot on goal within 3 seconds)
-5. Rebound angle change
-6. Speed from previous event (rush shots)
-7. Distance from previous event
-8. Previous event type (faceoff, hit, takeaway, etc.)
-9. Strength state (EV/PP/SH)
-10. Period (capped at 4 for OT)
-
-### Performance
-- **AUC-ROC: 0.7807** (MoneyPuck ~0.79-0.80)
-- **Log Loss: 0.5680** vs baseline 0.3452
-- **Best training window:** 20232024 + 20242025 (3 seasons hurt performance)
+### Main xG Model
+XGBoost trained on shots on goal + goals (non-empty-net).
+Calibrated with isotonic regression.
+- **AUC: 0.7610** (MoneyPuck ~0.79-0.80)
+- **Mean xG per SOG: 0.1078** (30 SOG × 0.1078 = 3.23 expected goals)
+- **Training window:** 20232024 + 20242025 (best of 4 windows tested)
+- **Strength_enc excluded** — xG should be location/context based only
 
 ### Feature Importances
 | Feature | Importance |
 |---|---|
-| Strength state | 30.4% |
-| Shot distance | 19.7% |
-| Period | 10.3% |
-| Shot angle | 7.3% |
-| Shot type | 7.0% |
-| Is rebound | 6.8% |
-| Speed from previous event | 6.0% |
-| Distance from previous event | 4.8% |
-| Previous event type | 3.9% |
-| Rebound angle change | 3.8% |
+| Shot distance | 29.8% |
+| Period | 11.7% |
+| Shot angle | 11.6% |
+| Shot type | 10.9% |
+| Speed from previous event | 8.9% |
+| Is rebound | 7.9% |
+| Distance from previous event | 7.3% |
+| Previous event type | 6.5% |
+| Rebound angle change | 5.4% |
+
+---
+
+## Phase 3 - Player Game Model (NEXT)
+
+### What to predict per player per game
+Goals, assists, points, shots on goal, hits, blocks, PIM, faceoffs won/taken, TOI, PPP, SHP
+
+### Output per stat
+- Probability distribution (Poisson for counts)
+- Most likely projected outcome
+- Props thresholds: P(goals > 0.5), P(points > 1.5), P(shots > 2.5), etc.
+
+### Key modeling considerations
+- **Regression to mean for shooting%:** if player shoots 30% last 10 games but
+  10% over 5 seasons, project toward career rate
+- **Deployment:** TOI at each strength (EV/PP/SH) is a key input
+- **Linemate quality:** on-ice shot rates and goal rates at each strength
+- **Opponent:** defensive shot suppression, goals against, xG against
+- **Goalie quality:** starting goalie save% and GSAx affects goal probability
+- **Training data:** 20192020 onward for regression baselines
+- **Validation:** test on 20252026 games already played
+
+### Missing player data (need play-by-play enrichment)
+- Hits, blocks, faceoffs, shot attempts not in player_game_logs.csv
+- These need to be pulled from play-by-play per game per player
+- Will build fetch_player_pbp_stats.py in Phase 3
 
 ---
 
@@ -162,28 +167,30 @@ Blocked shots excluded (shot was altered before reaching goalie).
 ### Raw Data (~/nhl-props/data/raw/)
 | File | Rows | Seasons | Notes |
 |------|------|---------|-------|
-| team_game_logs.csv | 7,332 | 20232024-20252026 | 71 cols, EV/PP/SH splits + strength TOI |
-| player_game_logs.csv | 251,573 | 20192020-20252026 | 29 cols |
-| goalie_game_logs.csv | 14,714 | 20192020-20252026 | 25 cols |
+| team_game_logs.csv | 7,332 | 20232024-20252026 | 71 cols, EV/PP/SH splits + TOI |
+| player_game_logs.csv | 251,573 | 20192020-20252026 | 29 cols, goals/assists/shots/TOI |
+| goalie_game_logs.csv | 14,714 | 20192020-20252026 | 25 cols, saves/shots/save pct |
 | shot_data.csv | 592,795 | 20222023-20252026 | 33 cols, full shot detail |
 
 ### Processed Data (~/nhl-props/data/processed/)
 | File | Rows | Notes |
 |------|------|-------|
-| shot_data_with_xg.csv | 424,041 | Unblocked shots with xG values |
-| team_features.csv | 3,666 | One row per game, 895 features, both teams |
+| shot_data_with_xg.csv | 432,713 | All shots with calibrated xG values |
+| team_features.csv | 3,666 | One row per game, 959 features |
 
 ### Models (~/nhl-props/models/)
 | File | Notes |
 |------|-------|
-| xg_model.json | XGBoost xG model |
+| xg_model.json | XGBoost xG model (non-empty-net) |
+| xg_calibrator.pkl | Isotonic regression calibrator |
 | xg_encoders.pkl | Shot type and prev event encoders |
-| team/home_goals_for.json | Goals model (home) |
-| team/away_goals_for.json | Goals model (away) |
-| team/home_won.json | Win probability model |
-| team/home_pp_toi.json | PP TOI model (home) |
-| team/away_pp_toi.json | PP TOI model (away) |
-| team/home_ev_toi.json | EV TOI model |
+| xg_en_model.pkl | Empty net xG logistic regression |
+| team/home_won.json | Win probability classifier |
+| team/home_goals_for.json | Home goals Poisson model |
+| team/away_goals_for.json | Away goals Poisson model |
+| team/home_ev_toi.json | EV TOI regression |
+| team/home_pp_toi.json | PP TOI regression |
+| team/away_pp_toi.json | Away PP TOI regression |
 | team/[other targets].json | Per-60 rate models |
 | team/feature_lists.pkl | Top 80 features per model |
 | team/residual_stds.pkl | Sigma values for Normal distributions |
@@ -198,58 +205,56 @@ Blocked shots excluded (shot was altered before reaching goalie).
 | fetch_goalie_game_logs.py | Full pull - goalie game logs | ~5-10 min |
 | fetch_shot_data.py | Full pull - shot events with coordinates | ~30-45 min |
 | update_data.py | Incremental update (--days 1/2/7/14) | ~3-5 min |
-| build_xg_model.py | Train xG model | ~5 min |
+| build_xg_model.py | Train xG + empty net models | ~5 min |
 | process_team_features.py | Build team matchup feature dataset | ~5 min |
 | build_team_model.py | Train team prediction models | ~10 min |
-| predict_game.py | Generate game predictions (in progress) | <1 min |
+| predict_game.py | Generate game predictions | <1 min |
 
 ---
 
 ## Technical Details
 
 ### Team Game Logs (71 cols)
-- One row per team per game (2 rows per game)
+- One row per team per game
 - EV/PP/SH prefix for strength state splits
-- New: ev_toi, pp_toi, sh_toi, en_toi (minutes at each strength)
+- ev_toi, pp_toi, sh_toi, en_toi = minutes at each strength
 - Calculated by tracking situationCode transitions in play-by-play
-- situationCode: away_goalie|away_skaters|home_skaters|home_goalie
-  - 1551=EV, 1451=home PP, 1541=away PP, 0651=home EN
 
-### Team Features (895 cols)
-- One row per game, home_ and away_ prefix
-- Rolling windows: last 5, 10, 20 games (opponent-adjusted for key stats)
-- Per-60 rates: ev_, pp_, sh_ prefix + _per60 suffix
-- Goalie features: save% and GSAx per 60 over last 20, 40 games, season, career
-- Primary goalie = most TOI in that game
-
-### Total Shots Calculation (planned)
-- EV shots = predicted EV shots/60 × predicted EV TOI / 60
-- PP shots = season avg PP shots/60 × predicted PP TOI / 60
-- SH shots = season avg SH shots/60 × predicted SH TOI / 60
-- Total = EV + PP + SH shots
-
-### Player Game Logs (29 cols)
-- TOI as float minutes (18:30 = 18.5)
-- Missing: hits, blocks, faceoffs, shot attempts (play-by-play enrichment in Phase 3)
-
-### Goalie Game Logs (25 cols)
-- decision null when goalie entered mid-game
-- saves = shots_against - goals_against
-- GSAx = saves - (shots_against × 0.906) [NHL avg save pct]
-
-### Update Script
-- python scripts/update_data.py --days N
-- Uses rosterSpots to only check players who played
-- Zero duplicates verified
-
-### NHL API
-- Base: https://api-web.nhle.com/v1
-- /club-schedule-season/{team}/{season}
-- /gamecenter/{game_id}/play-by-play
-- /roster/{team}/{season}
-- /player/{player_id}/game-log/{season}/2
+### situationCode Reference
+- 1551 = even strength (5v5)
+- 1451 = home power play (5v4)
+- 1541 = away power play (4v5)
+- 1441 = 4v4 OT
+- 0651 = home empty net
+- 1560 = away empty net
 
 ### NHL Ice Coordinates
 - x: -100 to +100, y: -42.5 to +42.5
 - Nets at x=±89, y=0
 - homeTeamDefendingSide flips each period
+- All xG coordinates normalized to attack right (positive x)
+
+### Team Features (959 cols)
+- One row per game, home_ and away_ prefix
+- Rolling windows: last 5, 10, 20 games
+- Opponent-adjusted: raw stat minus opponent season avg
+- Per-60 rolling avgs: _per60_last5, _per60_last10, _per60_season_avg
+- Weighted PP/SH rates: 50% current, 35% last season, 15% two seasons ago
+- Goalie: save_pct and gsax_per60 over last 20, 40, season, career
+
+### Player Game Logs (29 cols)
+- TOI as float minutes (18:30 = 18.5)
+- Missing: hits, blocks, faceoffs, shot attempts (Phase 3)
+
+### Goalie Game Logs (25 cols)
+- decision null when goalie entered mid-game
+- saves = shots_against - goals_against
+- GSAx = saves - (shots_against × 0.906)
+
+### NHL API
+- Base: https://api-web.nhle.com/v1
+- No auth required
+- /club-schedule-season/{team}/{season}
+- /gamecenter/{game_id}/play-by-play
+- /roster/{team}/{season}
+- /player/{player_id}/game-log/{season}/2
