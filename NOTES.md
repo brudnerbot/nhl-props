@@ -25,9 +25,10 @@ Build a full NHL analytics and props betting model system in 5 phases:
 - ✅ xG model built (AUC 0.7807)
 - ✅ Team features processed (3,666 matchups, 895 features)
 - ✅ Team model built (win prob AUC 0.6971, goals MAE 1.349)
-- 🔲 Fix PP/SH shot prediction approach — NEXT
-- 🔲 Build total shots output (rate × TOI)
-- 🔲 Build prediction output script
+- ✅ Fixed PP/SH shot prediction — use weighted multi-season rates × predicted TOI
+- ✅ Fixed DataFrame fragmentation warnings in process_team_features.py
+- ✅ Added weighted PP/SH rate columns (50% current, 35% last, 15% two seasons ago)
+- 🔲 Build predict_game.py output script — NEXT
 - 🔲 Build player model
 - 🔲 Build goalie model
 - 🔲 Build season projection model
@@ -200,6 +201,7 @@ Blocked shots excluded (shot was altered before reaching goalie).
 | build_xg_model.py | Train xG model | ~5 min |
 | process_team_features.py | Build team matchup feature dataset | ~5 min |
 | build_team_model.py | Train team prediction models | ~10 min |
+| predict_game.py | Generate game predictions (in progress) | <1 min |
 
 ---
 
