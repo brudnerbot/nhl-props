@@ -9,7 +9,7 @@ SHOT_XG = os.path.join(DATA_DIR, "processed/shot_data_with_xg.csv")
 GOALIE_LOGS = os.path.join(DATA_DIR, "raw/goalie_logs/goalie_game_logs.csv")
 OUTPUT_PATH = os.path.join(DATA_DIR, "processed/team_features.csv")
 
-ROLLING_WINDOWS = [5, 10, 20]
+ROLLING_WINDOWS = [10, 20, 30]  # L5 dropped - empirically adds noise not signal
 
 TEAM_STATS = [
     "goals_for", "goals_against",
@@ -54,20 +54,31 @@ TEAM_STATS = [
     "sh_fenwick_for_per60", "sh_fenwick_against_per60",
     # xG
     "xgf_sog_total", "xga_sog_total",
+    # PP/SH hits, giveaways, takeaways per60 (needed for TOI models)
+    "pp_hits_for_per60", "pp_hits_against_per60",
+    "sh_hits_for_per60", "sh_hits_against_per60",
+    "pp_giveaways_per60", "pp_takeaways_per60",
+    "sh_giveaways_per60", "sh_takeaways_per60",
+    "pp_shot_attempts_for_per60", "pp_shot_attempts_against_per60",
+    "sh_shot_attempts_for_per60", "sh_shot_attempts_against_per60",
+    # Shot funnel rates (rolling avgs computed for these)
+    "ev_fenwick_rate_for", "ev_block_rate_against",
+    "ev_sog_fenwick_rate_for", "ev_shooting_pct",
+    "ev_fenwick_rate_against", "ev_block_rate_for",
+    "ev_sog_fenwick_rate_against", "ev_save_pct_team",
+    "ev_xg_per_sog_for", "ev_xg_per_sog_against",
+    "pp_fenwick_rate_for", "pp_sog_fenwick_rate_for", "pp_shooting_pct",
+    "pp_fenwick_rate_against", "pp_sog_fenwick_rate_against", "pp_save_pct_team",
+    "sh_fenwick_rate_for", "sh_sog_fenwick_rate_for", "sh_shooting_pct",
+    "sh_fenwick_rate_against", "sh_sog_fenwick_rate_against", "sh_save_pct_team",
 ]
 
 
 def aggregate_xg(shot_df):
-    """
-    Aggregate shot-level xG into team-game-level totals by strength.
-    Two metrics:
-    - xgf/xga: cumulative shot danger (all unblocked shots)
-    - xgf_sog/xga_sog: expected goals (shots on goal only) - scale ~2-4
-    """
+    """Aggregate shot-level xG into team-game-level totals by strength."""
     print("  Aggregating xG per team per game...")
     shot_df = shot_df[shot_df["is_empty_net"] == 0].copy()
 
-    # Cumulative shot danger (all unblocked shots)
     xgf = shot_df.groupby(["game_id", "shooting_team", "strength"])["xg"].sum().reset_index()
     xgf.columns = ["game_id", "team", "strength", "xgf"]
     xga = shot_df.groupby(["game_id", "defending_team", "strength"])["xg"].sum().reset_index()
@@ -84,7 +95,6 @@ def aggregate_xg(shot_df):
     xg_pivot["xgf_total"] = xg_pivot[xgf_cols].sum(axis=1)
     xg_pivot["xga_total"] = xg_pivot[xga_cols].sum(axis=1)
 
-    # Expected goals (shots on goal only)
     sog_df = shot_df[shot_df["is_on_goal"] == 1].copy()
     xgf_sog = sog_df.groupby(["game_id", "shooting_team", "strength"])["xg"].sum().reset_index()
     xgf_sog.columns = ["game_id", "team", "strength", "xgf_sog"]
@@ -110,10 +120,7 @@ def aggregate_xg(shot_df):
 
 
 def aggregate_goalie_stats(goalie_df):
-    """
-    For each game, get the primary goalie's stats and compute
-    weighted save% and GSAx across multiple time windows.
-    """
+    """Compute primary goalie save% and GSAx across multiple time windows."""
     print("  Processing goalie stats...")
     goalie_df = goalie_df.copy()
     goalie_df["date"] = pd.to_datetime(goalie_df["date"])
@@ -177,7 +184,6 @@ def aggregate_goalie_stats(goalie_df):
             results.append(row)
 
     goalie_features = pd.DataFrame(results)
-
     primary_goalies = goalie_features.sort_values("toi", ascending=False).drop_duplicates(
         subset=["game_id", "team"]
     )[["game_id", "team", "save_pct_last20", "save_pct_last40",
@@ -254,6 +260,134 @@ def add_pp_pk(df):
     return pd.concat([df, pd.DataFrame(new_cols, index=df.index)], axis=1)
 
 
+def add_shot_funnel_rates(df):
+    """
+    Calculate team-specific shot funnel conversion rates.
+    Shot Attempts → Fenwick (unblocked) → SOG → Goals
+    """
+    new_cols = {}
+
+    for strength in ["ev", "pp", "sh"]:
+        att_for = df[f"{strength}_shot_attempts_for"].replace(0, np.nan)
+        att_against = df[f"{strength}_shot_attempts_against"].replace(0, np.nan)
+        fen_for = df[f"{strength}_fenwick_for"].replace(0, np.nan)
+        fen_against = df[f"{strength}_fenwick_against"].replace(0, np.nan)
+        sog_for = df[f"{strength}_shots_on_goal_for"].replace(0, np.nan)
+        sog_against = df[f"{strength}_shots_on_goal_against"].replace(0, np.nan)
+        goals_for = df[f"{strength}_goals_for"].replace(0, np.nan)
+        goals_against = df[f"{strength}_goals_against"].replace(0, np.nan)
+
+        # Offensive funnel rates
+        new_cols[f"{strength}_fenwick_rate_for"] = fen_for / att_for
+        new_cols[f"{strength}_block_rate_against"] = 1 - (fen_for / att_for)
+        new_cols[f"{strength}_sog_fenwick_rate_for"] = sog_for / fen_for
+        new_cols[f"{strength}_shooting_pct"] = goals_for / sog_for
+
+        # Defensive funnel rates
+        new_cols[f"{strength}_fenwick_rate_against"] = fen_against / att_against
+        new_cols[f"{strength}_block_rate_for"] = 1 - (fen_against / att_against)
+        new_cols[f"{strength}_sog_fenwick_rate_against"] = sog_against / fen_against
+        new_cols[f"{strength}_save_pct_team"] = 1 - (goals_against / sog_against)
+
+        # xG quality rates
+        xgf_col = f"xgf_{strength}"
+        xga_col = f"xga_{strength}"
+        if xgf_col in df.columns:
+            new_cols[f"{strength}_xg_per_sog_for"] = df[xgf_col] / sog_for
+        if xga_col in df.columns:
+            new_cols[f"{strength}_xg_per_sog_against"] = df[xga_col] / sog_against
+
+    result_df = pd.concat([df, pd.DataFrame(new_cols, index=df.index)], axis=1)
+    funnel_cols = list(new_cols.keys())
+    result_df[funnel_cols] = result_df[funnel_cols].replace([np.inf, -np.inf], np.nan).fillna(0)
+    return result_df
+
+
+def add_weighted_funnel_rates(df):
+    """
+    Calculate weighted multi-season shot funnel rates.
+    Different weights based on how mean-reverting each stat is:
+    - Shooting%: most mean-reverting (40/35/25)
+    - SOG/Fenwick rate: somewhat mean-reverting (45/35/20)
+    - Block rate: more stable, system-driven (55/30/15)
+    """
+    print("  Computing weighted funnel rates...")
+
+    SEASONS = sorted(df["season"].unique())
+
+   # Weights derived empirically from predictability analysis:
+    # SOG/Fenwick and block rate: 3yr avg most predictive → equal weight across seasons
+    # Shooting%: barely predictable → shrink heavily, equal weight for stability
+    # xG per SOG: similar to shooting%, needs regression to mean
+    WEIGHT_CONFIGS = {
+        # Shooting% - barely predictable, shrink toward mean, use all seasons equally
+        "shooting_pct":              {0: 0.34, -1: 0.33, -2: 0.33},
+        # SOG/Fenwick - 3yr avg best, system trait
+        "sog_fenwick_rate_for":      {0: 0.34, -1: 0.33, -2: 0.33},
+        "sog_fenwick_rate_against":  {0: 0.34, -1: 0.33, -2: 0.33},
+        # Block rate - 3yr avg best, coaching/system trait
+        "block_rate_for":            {0: 0.34, -1: 0.33, -2: 0.33},
+        "block_rate_against":        {0: 0.34, -1: 0.33, -2: 0.33},
+        "fenwick_rate_for":          {0: 0.34, -1: 0.33, -2: 0.33},
+        "fenwick_rate_against":      {0: 0.34, -1: 0.33, -2: 0.33},
+        # xG per SOG - shot quality, needs regression to mean
+        "xg_per_sog_for":            {0: 0.34, -1: 0.33, -2: 0.33},
+        "xg_per_sog_against":        {0: 0.34, -1: 0.33, -2: 0.33},
+        # Team save% - goalie quality, somewhat persistent
+        "save_pct_team":             {0: 0.34, -1: 0.33, -2: 0.33},
+    }
+
+    # Build list of stats to weight
+    stats_to_weight = []
+    for strength in ["ev", "pp", "sh"]:
+        for stat_key in WEIGHT_CONFIGS.keys():
+            col = f"{strength}_{stat_key}"
+            if col in df.columns:
+                stats_to_weight.append((col, stat_key))
+
+    results = []
+    for team, team_df in df.groupby("team"):
+        team_df = team_df.sort_values("date").reset_index(drop=True)
+
+        for i in range(len(team_df)):
+            row = team_df.iloc[i].copy()
+            current_season = row["season"]
+            season_idx = list(SEASONS).index(current_season) if current_season in SEASONS else -1
+
+            for col, stat_key in stats_to_weight:
+                weights = WEIGHT_CONFIGS[stat_key]
+                weighted_sum = 0.0
+                weight_total = 0.0
+
+                for offset, weight in weights.items():
+                    target_season_idx = season_idx + offset
+                    if target_season_idx < 0 or target_season_idx >= len(SEASONS):
+                        continue
+                    target_season = SEASONS[target_season_idx]
+                    past_season_games = team_df[
+                        (team_df["season"] == target_season) &
+                        (team_df["date"] < row["date"])
+                    ]
+                    if len(past_season_games) >= 5 and col in past_season_games.columns:
+                        # Filter out zeros (games with no data)
+                        valid = past_season_games[col].replace(0, np.nan).dropna()
+                        if len(valid) >= 5:
+                            season_avg = valid.mean()
+                            if not np.isnan(season_avg):
+                                weighted_sum += season_avg * weight
+                                weight_total += weight
+
+                row[f"weighted_{col}"] = weighted_sum / weight_total if weight_total > 0 else None
+
+            results.append(row)
+
+    result_df = pd.DataFrame(results)
+    weighted_cols = [c for c in result_df.columns if c.startswith("weighted_") and
+                     any(k in c for k in WEIGHT_CONFIGS.keys())]
+    print(f"  Added {len(weighted_cols)} weighted funnel rate columns")
+    return result_df
+
+
 def add_rolling_features(df):
     """Compute rolling averages over last 5, 10, 20 games with opponent adjustment."""
     print("  Computing rolling averages...")
@@ -273,8 +407,10 @@ def add_rolling_features(df):
             for window in ROLLING_WINDOWS:
                 past_w = past.tail(window)
                 for stat in TEAM_STATS:
-                    col = f"{stat}_last{window}"
-                    row[col] = past_w[stat].mean() if len(past_w) > 0 else None
+                    if stat in team_df.columns:
+                        row[f"{stat}_last{window}"] = (
+                            past_w[stat].mean() if len(past_w) > 0 else None
+                        )
 
                 if len(past_w) > 0:
                     opp_adjustments = []
@@ -289,8 +425,8 @@ def add_rolling_features(df):
                             opp_adjustments.append(opp_avg.iloc[0].to_dict())
                     if opp_adjustments:
                         opp_df = pd.DataFrame(opp_adjustments)
-                        for stat in ["ev_shots_on_goal_against", "ev_shot_attempts_against",
-                                     "goals_against"]:
+                        for stat in ["ev_shots_on_goal_against",
+                                     "ev_shot_attempts_against", "goals_against"]:
                             opp_col = f"season_avg_{stat}"
                             if opp_col in opp_df.columns:
                                 row[f"{stat}_opp_adj_last{window}"] = (
@@ -300,9 +436,10 @@ def add_rolling_features(df):
             current_season = row["season"]
             season_past = past[past["season"] == current_season]
             for stat in TEAM_STATS:
-                row[f"{stat}_season_avg"] = (
-                    season_past[stat].mean() if len(season_past) > 0 else None
-                )
+                if stat in team_df.columns:
+                    row[f"{stat}_season_avg"] = (
+                        season_past[stat].mean() if len(season_past) > 0 else None
+                    )
 
             if i > 0:
                 prev_date = pd.to_datetime(team_df.iloc[i - 1]["date"])
@@ -320,14 +457,13 @@ def add_rolling_features(df):
 
 
 def add_weighted_pp_sh_rates(df):
-    """
-    Calculate weighted multi-season PP and SH shots per 60.
-    Weights: current season 50%, last season 35%, two seasons ago 15%.
-    """
+    """Weighted multi-season PP/SH shots per 60 (50/35/15)."""
     print("  Computing weighted PP/SH rate stats...")
 
     SEASONS = sorted(df["season"].unique())
-    WEIGHTS = {0: 0.50, -1: 0.35, -2: 0.15}
+   # Current season dominates for shots/goals per 60
+    # (empirically: current season ≈ last30 >> multi-season for these stats)
+    WEIGHTS = {0: 0.60, -1: 0.30, -2: 0.10}
 
     stats_to_weight = [
         "pp_shots_on_goal_for_per60", "pp_shots_on_goal_against_per60",
@@ -379,10 +515,7 @@ def add_weighted_pp_sh_rates(df):
 
 
 def build_matchup_features(df):
-    """
-    Combine home and away team features into a single matchup row.
-    Each row represents one game with both teams' features.
-    """
+    """Combine home and away team features into a single matchup row."""
     print("  Building matchup features...")
 
     home = df[df["is_home"] == True].copy()
@@ -405,12 +538,14 @@ def build_matchup_features(df):
     matchup = home_renamed.merge(away_renamed, on="game_id", how="inner")
     matchup = matchup.sort_values("date").reset_index(drop=True)
 
-    # Verify goalie columns made it through
     goalie_check = [c for c in matchup.columns if "save_pct" in c]
     if not goalie_check:
-        print("  WARNING: Goalie columns missing from matchup features!")
+        print("  WARNING: Goalie columns missing!")
     else:
         print(f"  Goalie columns included: {len(goalie_check)}")
+
+    weighted_funnel = [c for c in matchup.columns if "weighted_ev_" in c]
+    print(f"  Weighted funnel rate columns: {len(weighted_funnel)}")
 
     print(f"  Matchup features built: {len(matchup)} games")
     return matchup
@@ -434,7 +569,7 @@ def main():
     team_df = team_df.merge(xg_features, on=["game_id", "team"], how="left")
     xg_cols = [c for c in xg_features.columns if c not in ["game_id", "team"]]
     team_df[xg_cols] = team_df[xg_cols].fillna(0)
-    print(f"  xG columns added: {xg_cols}")
+    print(f"  xG columns added: {len(xg_cols)}")
 
     print("\nStep 3: Adding Fenwick and per-60 rates...")
     team_df = add_fenwick(team_df)
@@ -443,19 +578,26 @@ def main():
     print("\nStep 4: Adding PP%/PK%...")
     team_df = add_pp_pk(team_df)
 
+    print("\nStep 4b: Adding shot funnel rates...")
+    team_df = add_shot_funnel_rates(team_df)
+
     print("\nStep 5: Computing rolling averages...")
     team_df = add_rolling_features(team_df)
 
     print("\nStep 6: Computing weighted PP/SH rate stats...")
     team_df = add_weighted_pp_sh_rates(team_df)
 
+    print("\nStep 6b: Computing weighted funnel rates...")
+    team_df = add_weighted_funnel_rates(team_df)
+
     print("\nStep 7: Computing goalie features...")
     goalie_features = aggregate_goalie_stats(goalie_df)
     team_df = team_df.merge(goalie_features, on=["game_id", "team"], how="left")
-    goalie_cols = ["save_pct_last20", "save_pct_last40", "save_pct_current_season",
-                   "save_pct_career", "gsax_per60_last20", "gsax_per60_last40",
+    goalie_cols = ["save_pct_last20", "save_pct_last40",
+                   "save_pct_current_season", "save_pct_career",
+                   "gsax_per60_last20", "gsax_per60_last40",
                    "gsax_per60_current_season", "gsax_per60_career"]
-    print(f"  Goalie cols after merge: {[c for c in goalie_cols if c in team_df.columns]}")
+    print(f"  Goalie cols: {[c for c in goalie_cols if c in team_df.columns]}")
     print(f"  Goalie null count: {team_df['save_pct_last20'].isnull().sum()}")
 
     print("\nStep 8: Building matchup features...")

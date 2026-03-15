@@ -189,6 +189,35 @@ EXCLUDE_COLS = [
     "away_ev_hits_for_per60", "away_ev_hits_against_per60",
     "home_ev_giveaways_per60", "home_ev_takeaways_per60",
     "away_ev_giveaways_per60", "away_ev_takeaways_per60",
+
+    # Raw single-game shot funnel rates - severe data leakage
+    # (computed from same game outcomes - only use rolling averages)
+    "home_ev_fenwick_rate_for", "home_ev_block_rate_against",
+    "away_ev_fenwick_rate_for", "away_ev_block_rate_against",
+    "home_ev_sog_fenwick_rate_for", "home_ev_shooting_pct",
+    "away_ev_sog_fenwick_rate_for", "away_ev_shooting_pct",
+    "home_ev_fenwick_rate_against", "home_ev_block_rate_for",
+    "away_ev_fenwick_rate_against", "away_ev_block_rate_for",
+    "home_ev_sog_fenwick_rate_against", "home_ev_save_pct_team",
+    "away_ev_sog_fenwick_rate_against", "away_ev_save_pct_team",
+    "home_ev_xg_per_sog_for", "home_ev_xg_per_sog_against",
+    "away_ev_xg_per_sog_for", "away_ev_xg_per_sog_against",
+    "home_pp_fenwick_rate_for", "home_pp_sog_fenwick_rate_for",
+    "away_pp_fenwick_rate_for", "away_pp_sog_fenwick_rate_for",
+    "home_pp_shooting_pct", "away_pp_shooting_pct",
+    "home_pp_fenwick_rate_against", "home_pp_sog_fenwick_rate_against",
+    "away_pp_fenwick_rate_against", "away_pp_sog_fenwick_rate_against",
+    "home_pp_save_pct_team", "away_pp_save_pct_team",
+    "home_sh_fenwick_rate_for", "home_sh_sog_fenwick_rate_for",
+    "away_sh_fenwick_rate_for", "away_sh_sog_fenwick_rate_for",
+    "home_sh_shooting_pct", "away_sh_shooting_pct",
+    "home_sh_fenwick_rate_against", "home_sh_sog_fenwick_rate_against",
+    "away_sh_fenwick_rate_against", "away_sh_sog_fenwick_rate_against",
+    "home_sh_save_pct_team", "away_sh_save_pct_team",
+    "home_sh_xg_per_sog_for", "home_sh_xg_per_sog_against",
+    "away_sh_xg_per_sog_for", "away_sh_xg_per_sog_against",
+    "home_pp_xg_per_sog_for", "home_pp_xg_per_sog_against",
+    "away_pp_xg_per_sog_for", "away_pp_xg_per_sog_against",
 ]
 
 # Store residual stds from training for Normal distributions

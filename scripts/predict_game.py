@@ -45,16 +45,19 @@ def load_models():
 def build_matchup_row(df, home_team, away_team, game_date=None):
     """
     Build a single matchup row for prediction.
-    Gets the most recent feature row for each team regardless of home/away,
-    then correctly assigns home_ and away_ prefixes for the new matchup.
+    Gets each team's most recent rolling average features regardless
+    of home/away context, then combines them into a matchup row.
+    The key insight: rolling averages (last5/10/20/season_avg) are
+    computed from ALL games so they're home/away agnostic.
+    We just need to assign them the correct home_ or away_ prefix.
     """
     if game_date:
         candidates = df[df["date"] < game_date].copy()
     else:
         candidates = df.copy()
 
-    def get_team_stats(team):
-        """Get most recent stats for a team, from either home or away perspective."""
+    def get_latest_row(team):
+        """Get most recent game row for a team regardless of home/away."""
         home_rows = candidates[candidates["home_team"] == team]
         away_rows = candidates[candidates["away_team"] == team]
 
@@ -66,44 +69,104 @@ def build_matchup_row(df, home_team, away_team, game_date=None):
 
         if latest_home is not None and latest_away is not None:
             if latest_home["date"] >= latest_away["date"]:
-                source = "home"
-                row = latest_home
+                return latest_home, "home"
             else:
-                source = "away"
-                row = latest_away
+                return latest_away, "away"
         elif latest_home is not None:
-            source = "home"
-            row = latest_home
+            return latest_home, "home"
         else:
-            source = "away"
-            row = latest_away
+            return latest_away, "away"
 
-        return row, source
+    home_row, home_source = get_latest_row(home_team)
+    away_row, away_source = get_latest_row(away_team)
 
-    home_row, home_source = get_team_stats(home_team)
-    away_row, away_source = get_team_stats(away_team)
+    home_date = str(home_row["date"])[:10]
+    away_date = str(away_row["date"])[:10]
+    print(f"  {home_team}: features from {home_source} game on {home_date}")
+    print(f"  {away_team}: features from {away_source} game on {away_date}")
 
-    home_date = home_row["date"]
-    away_date = away_row["date"]
-    if hasattr(home_date, "strftime"):
-        home_date = home_date.strftime("%Y-%m-%d")
-    if hasattr(away_date, "strftime"):
-        away_date = away_date.strftime("%Y-%m-%d")
+    # Rolling average and stable feature suffixes we want to use
+    # These are computed from ALL games so are home/away agnostic
+    ROLLING_SUFFIXES = [
+        "_last5", "_last10", "_last20", "_last30", "_season_avg",
+        "_opp_adj_last5", "_opp_adj_last10", "_opp_adj_last20", "_opp_adj_last30",
+    ]
+    STABLE_FEATURES = [
+        "days_rest", "is_back_to_back",
+        "save_pct_last20", "save_pct_last40",
+        "save_pct_current_season", "save_pct_career",
+        "gsax_per60_last20", "gsax_per60_last40",
+        "gsax_per60_current_season", "gsax_per60_career",
+    ]
+    WEIGHTED_PREFIX = "weighted_"
+    PER60_SUFFIX = "_per60"
 
-    print(f"  {home_team}: using {home_source} game from {home_date}")
-    print(f"  {away_team}: using {away_source} game from {away_date}")
-
-    def extract_team_stats(row, source, new_prefix):
-        """Extract team stats and rename prefix."""
+    def extract_rolling_features(row, source_prefix, new_prefix):
+        """
+        Extract rolling average features from a row.
+        source_prefix: 'home' or 'away' — perspective in source row
+        new_prefix: 'home' or 'away' — perspective in new matchup
+        """
         result = {}
         for col in row.index:
-            if col.startswith(f"{source}_"):
-                new_col = col.replace(f"{source}_", f"{new_prefix}_", 1)
+            if not col.startswith(f"{source_prefix}_"):
+                continue
+            col_suffix = col[len(f"{source_prefix}_"):]
+
+            # Include rolling averages
+            if any(col_suffix.endswith(s) for s in ROLLING_SUFFIXES):
+                new_col = f"{new_prefix}_{col_suffix}"
                 result[new_col] = row[col]
+                continue
+
+            # Include stable features (goalie, etc.)
+            if any(col_suffix == f for f in STABLE_FEATURES):
+                new_col = f"{new_prefix}_{col_suffix}"
+                result[new_col] = row[col]
+                continue
+
+            # Include weighted features
+            if col_suffix.startswith(WEIGHTED_PREFIX):
+                new_col = f"{new_prefix}_{col_suffix}"
+                result[new_col] = row[col]
+                continue
+
+            # Per-60 stats: only include rolling average versions
+            # Raw single-game per-60 is too noisy (one outlier game contaminates)
+            if PER60_SUFFIX in col_suffix:
+                if any(s in col_suffix for s in ["_last10", "_last20", "_last30",
+                                                   "_season_avg", "weighted_"]):
+                    new_col = f"{new_prefix}_{col_suffix}"
+                    result[new_col] = row[col]
+                # Raw per-60: find best rolling substitute
+                else:
+                    substituted = False
+                    for suffix in ["_last20", "_last10", "_last30", "_season_avg"]:
+                        sub_col = f"{source_prefix}_{col_suffix}{suffix}"
+                        if sub_col in row.index and not pd.isna(row[sub_col]) and row[sub_col] != 0:
+                            new_col = f"{new_prefix}_{col_suffix}"
+                            result[new_col] = row[sub_col]
+                            substituted = True
+                            break
+                    if not substituted:
+                        # Skip entirely — model will fillna(0) which is safer than outlier
+                        pass
+                continue
+
+            # Include raw funnel rates (block_rate, sog_fenwick_rate, etc.)
+            FUNNEL_RATE_KEYS = [
+                "block_rate", "sog_fenwick_rate", "fenwick_rate",
+                "xg_per_sog", "save_pct_team", "shooting_pct"
+            ]
+            if any(key in col_suffix for key in FUNNEL_RATE_KEYS):
+                new_col = f"{new_prefix}_{col_suffix}"
+                result[new_col] = row[col]
+                continue
+
         return result
 
-    home_stats = extract_team_stats(home_row, home_source, "home")
-    away_stats = extract_team_stats(away_row, away_source, "away")
+    home_stats = extract_rolling_features(home_row, home_source, "home")
+    away_stats = extract_rolling_features(away_row, away_source, "away")
 
     home_stats["home_team"] = home_team
     away_stats["away_team"] = away_team
@@ -113,7 +176,6 @@ def build_matchup_row(df, home_team, away_team, game_date=None):
     combined["season"] = home_row["season"]
 
     return pd.Series(combined)
-
 
 def predict_stat(model, feature_list, row, model_type):
     """Run prediction for a single stat."""
