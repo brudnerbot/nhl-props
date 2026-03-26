@@ -160,6 +160,24 @@ EXCLUDE_COLS = [
     "home_sh_penalties_drawn", "away_sh_penalties_drawn",
     "home_sh_penalty_minutes", "away_sh_penalty_minutes",
 
+    # Raw minor/major penalty counts (same-game actuals — leakage into TOI model)
+    "home_ev_minor_penalties_taken", "away_ev_minor_penalties_taken",
+    "home_ev_minor_penalties_drawn", "away_ev_minor_penalties_drawn",
+    "home_ev_major_penalties_taken", "away_ev_major_penalties_taken",
+    "home_ev_major_penalties_drawn", "away_ev_major_penalties_drawn",
+    "home_pp_minor_penalties_taken", "away_pp_minor_penalties_taken",
+    "home_pp_minor_penalties_drawn", "away_pp_minor_penalties_drawn",
+    "home_pp_major_penalties_taken", "away_pp_major_penalties_taken",
+    "home_pp_major_penalties_drawn", "away_pp_major_penalties_drawn",
+    "home_sh_minor_penalties_taken", "away_sh_minor_penalties_taken",
+    "home_sh_minor_penalties_drawn", "away_sh_minor_penalties_drawn",
+    "home_sh_major_penalties_taken", "away_sh_major_penalties_taken",
+    "home_sh_major_penalties_drawn", "away_sh_major_penalties_drawn",
+    "home_total_minor_penalties_taken", "away_total_minor_penalties_taken",
+    "home_total_minor_penalties_drawn", "away_total_minor_penalties_drawn",
+    "home_total_penalties_taken", "away_total_penalties_taken",
+    "home_total_penalties_drawn", "away_total_penalties_drawn",
+
     # Raw PP%/PK% (single game too noisy)
     "home_pp_pct", "away_pp_pct",
     "home_pk_pct", "away_pk_pct",

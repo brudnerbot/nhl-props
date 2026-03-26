@@ -11,9 +11,6 @@ warnings.filterwarnings("ignore")
 DATA_PATH = os.path.expanduser("~/nhl-props/data/processed/team_features.csv")
 MODEL_DIR = os.path.expanduser("~/nhl-props/models/team")
 
-LEAGUE_AVG_SH_SHOTS_PER60 = 11.5
-
-
 def load_models():
     print("Loading models...")
     models = {}
@@ -280,55 +277,42 @@ def predict_game(home_team, away_team, game_date=None, verbose=True):
         sh = predictions[f"{side}_sh_toi"]
         predictions[f"{side}_ev_toi"] = max(AVG_GAME_TOI - pp - sh, 30.0)
 
-    # --- Step 6: EV shots per 60 (model prediction) ---
-    for side in ["home", "away"]:
-        target = f"{side}_ev_shots_on_goal_for_per60"
-        if target in models:
-            predictions[f"{side}_ev_shots_per60"] = predict_stat(
-                models[target], feature_lists[target], row, "regression")
+    # --- Step 6: Total shots (empirical formula, beats XGBoost) ---
+    # own_last30 × 0.55 + opp_shots_against_last30 × 0.45
+    # Derived from 13,192 game observations across 6 seasons
+    # MAE 5.002 vs XGBoost 5.378
+    LEAGUE_AVG_SHOTS = float(df["home_total_shots_on_goal_for"].mean())
 
-    # --- Step 7: EV shot attempts per 60 (model prediction) ---
-    for side in ["home", "away"]:
-        target = f"{side}_ev_shot_attempts_for_per60"
-        if target in models:
-            predictions[f"{side}_ev_attempts_per60"] = predict_stat(
-                models[target], feature_lists[target], row, "regression")
+    for side, opp_side in [("home", "away"), ("away", "home")]:
+        own_l30 = row.get(f"{side}_total_shots_on_goal_for_last30")
+        opp_against_l30 = row.get(f"{opp_side}_total_shots_on_goal_against_last30")
 
-    # --- Step 8: Total shots and attempts ---
-    for side in ["home", "away"]:
-        ev_shots_per60 = predictions.get(f"{side}_ev_shots_per60", 27.0)
-        ev_attempts_per60 = predictions.get(f"{side}_ev_attempts_per60", 57.0)
-        ev_toi = predictions[f"{side}_ev_toi"]
+        if own_l30 is None or pd.isna(own_l30):
+            own_l30 = row.get(f"{side}_total_shots_on_goal_for_season_avg", LEAGUE_AVG_SHOTS)
+        if opp_against_l30 is None or pd.isna(opp_against_l30):
+            opp_against_l30 = row.get(f"{opp_side}_total_shots_on_goal_against_season_avg", LEAGUE_AVG_SHOTS)
+
+        total = 0.55 * float(own_l30) + 0.45 * float(opp_against_l30)
+
+       # Back-calculate EV shots = total - PP shots - SH shots
+        # Method: cumulative season PP shots/60 × predicted PP TOI
+        # Beats flat season_avg (MAE 2.644 vs 2.739, bias -0.156 vs +0.203)
+        LEAGUE_AVG_PP_PER60 = LEAGUE_AVG_PP_SHOTS / (LEAGUE_AVG_PP_TOI / 60)
+        pp_per60_cum = row.get(f"{side}_pp_shots_on_goal_for_per60_cumulative_season")
+        if pp_per60_cum is None or pd.isna(pp_per60_cum):
+            pp_per60_cum = LEAGUE_AVG_PP_PER60
         pp_toi = predictions[f"{side}_pp_toi"]
+        pp_shots = float(pp_per60_cum) * (pp_toi / 60)
         sh_toi = predictions[f"{side}_sh_toi"]
-
-        # EV shots: model rate × EV TOI
-        ev_shots = ev_shots_per60 * (ev_toi / 60)
-
-        # PP shots: use season avg directly (per-60 rate unreliable due to short PP time)
-        pp_shots_season = row.get(f"{side}_pp_shots_on_goal_for_season_avg")
-        pp_shots_last30 = row.get(f"{side}_pp_shots_on_goal_for_last30")
-        if pp_shots_season is not None and not pd.isna(pp_shots_season) and float(pp_shots_season) > 0:
-            pp_shots = float(pp_shots_season)
-        elif pp_shots_last30 is not None and not pd.isna(pp_shots_last30) and float(pp_shots_last30) > 0:
-            pp_shots = float(pp_shots_last30)
-        else:
-            pp_shots = LEAGUE_AVG_PP_SHOTS
-
-        # SH shots: weighted rate × SH TOI
         weighted_sh = row.get(f"{side}_weighted_sh_shots_on_goal_for_per60")
-        if weighted_sh is None or pd.isna(weighted_sh):
-            weighted_sh = LEAGUE_AVG_SH_SHOTS_PER60
+        if weighted_sh is None or pd.isna(weighted_sh): weighted_sh = LEAGUE_AVG_SH_SHOTS_PER60
         sh_shots = float(weighted_sh) * (sh_toi / 60)
+        ev_shots = max(total - pp_shots - sh_shots, 0)
 
-        total = ev_shots + pp_shots + sh_shots
-
+        # Sigma from residual std of EV shots model (still valid for uncertainty)
+        ev_toi = predictions[f"{side}_ev_toi"]
         sigma = residual_stds.get(f"{side}_ev_shots_on_goal_for_per60", 5.0)
         sigma_total = sigma * (ev_toi / 60)
-
-        ev_attempts = ev_attempts_per60 * (ev_toi / 60)
-        sigma_attempts = residual_stds.get(f"{side}_ev_shot_attempts_for_per60", ev_attempts * 0.15)
-        sigma_attempts_total = sigma_attempts * (ev_toi / 60)
 
         predictions[f"{side}_total_shots"] = {
             "total": total, "ev_shots": ev_shots,
@@ -336,13 +320,25 @@ def predict_game(home_team, away_team, game_date=None, verbose=True):
             "sigma": sigma_total,
             **normal_thresholds(total, sigma_total, [19.5, 24.5, 27.5, 29.5, 32.5, 34.5])
         }
-        predictions[f"{side}_ev_attempts"] = {
-            "total": ev_attempts, "per60": ev_attempts_per60,
-            "sigma": sigma_attempts_total,
-            **normal_thresholds(ev_attempts, sigma_attempts_total, [20.5, 25.5, 30.5, 35.5, 40.5])
-        }
 
-    # --- Step 9: xG ---
+    # --- Step 7: EV shot attempts (model prediction still useful) ---
+    for side in ["home", "away"]:
+        target = f"{side}_ev_shot_attempts_for_per60"
+        if target in models:
+            ev_attempts_per60 = predict_stat(
+                models[target], feature_lists[target], row, "regression")
+            ev_toi = predictions[f"{side}_ev_toi"]
+            ev_attempts = ev_attempts_per60 * (ev_toi / 60)
+            sigma_attempts = residual_stds.get(target, ev_attempts * 0.15)
+            sigma_attempts_total = sigma_attempts * (ev_toi / 60)
+            predictions[f"{side}_ev_attempts"] = {
+                "total": ev_attempts, "per60": ev_attempts_per60,
+                "sigma": sigma_attempts_total,
+                **normal_thresholds(ev_attempts, sigma_attempts_total,
+                                    [20.5, 25.5, 30.5, 35.5, 40.5])
+            }
+
+    # --- Step 8: xG ---
     for side in ["home", "away"]:
         target = f"{side}_xgf_total"
         if target in models:
