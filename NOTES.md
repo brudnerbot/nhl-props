@@ -194,3 +194,36 @@ Need: fetch_player_pbp_stats.py
 - No auth required
 - Situation codes: 1551=EV, 1451=home PP, 1541=away PP, 0651/1560=EN
 - Ice coords: x±100, y±42.5, nets at x=±89
+
+## Bug Fixes & Improvements (Mar 2026)
+
+### Fix 1: Same-game penalty leakage in TOI model
+Raw single-game penalty counts (home/away_ev/pp/sh/total_minor/major_penalties_taken/drawn)
+were in the feature pool and being selected by the TOI model. These are same-game actuals
+(mean ~3.1/game, max 17-21) that wouldn't be available pre-game.
+Added all 28 columns to EXCLUDE_COLS in build_team_model.py and retrained.
+
+Results after fix:
+| Model        | Before  | After   |
+|---|---|---|
+| home_pp_toi MAE | ~2.043 | 0.795 |
+| away_pp_toi MAE | ~2.092 | 0.717 |
+| home_won AUC    | 0.7430 | 0.7530 |
+
+### Fix 2: PP shots back-calculation method
+predict_game.py was using flat pp_shots_season_avg (~5.2) regardless of predicted PP TOI.
+This over-predicted low PP TOI games (+2.9 shots) and under-predicted high PP TOI games (-3.1).
+Switched to: pp_shots = pp_shots_per60_cumulative_season × (pred_pp_toi / 60)
+
+Results:
+| Method | MAE | Bias |
+|---|---|---|
+| Flat season_avg (old) | 2.739 | +0.203 |
+| cumul_per60 × TOI (new) | 2.644 | -0.156 |
+
+### Empirical finding: total shots formula near ceiling
+Grid searched 3-way blends of own_last30 / opp_against_last30 / season_avg.
+Best combo (own=0.38, opp=0.46, season=0.15) improved test MAE by only 0.001.
+Current formula (own_last30×0.55 + opp_against_last30×0.45) is near-optimal.
+Per-team bias in extreme teams (COL, VGK under; PHI, CHI over) is irreducible
+from pre-game data — it reflects true game-to-game variance in shot volume.
