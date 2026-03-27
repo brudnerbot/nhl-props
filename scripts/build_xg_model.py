@@ -6,66 +6,95 @@ from sklearn.preprocessing import LabelEncoder
 from sklearn.metrics import log_loss, roc_auc_score, brier_score_loss
 from sklearn.linear_model import LogisticRegression
 from sklearn.preprocessing import StandardScaler
-from sklearn.isotonic import IsotonicRegression
 import xgboost as xgb
 
 # --- CONFIG ---
-DATA_PATH = os.path.expanduser("~/nhl-props/data/raw/shot_data/shot_data.csv")
-MODEL_DIR = os.path.expanduser("~/nhl-props/models")
+DATA_PATH   = os.path.expanduser("~/nhl-props/data/raw/shot_data/shot_data.csv")
+PLAYER_PATH = os.path.expanduser("~/nhl-props/data/raw/game_logs/player_game_logs.csv")
+MODEL_DIR   = os.path.expanduser("~/nhl-props/models")
 os.makedirs(MODEL_DIR, exist_ok=True)
 
+# Rush definition: fast shot from distance (neutral zone entry or odd-man rush)
+RUSH_SPEED_THRESHOLD    = 20.0   # ft/s
+RUSH_PREV_DIST_THRESHOLD = 75.0  # ft from previous event
 
-def load_and_prepare(path):
-    print("Loading shot data...")
-    df = pd.read_csv(path)
-    print(f"  Total shots: {len(df)}")
 
-    # Train only on shots on goal and goals (clean save/goal outcome)
+def build_position_map(player_path):
+    """Build shooter_id -> is_forward mapping from player game logs."""
+    print("Building position map from player game logs...")
+    pl = pd.read_csv(player_path, low_memory=False)
+    pl = pl[["player_id", "position"]].drop_duplicates("player_id")
+    # F = forwards (C, L, R, W, LW, RW), D = defenseman
+    pl["is_forward"] = pl["position"].str.upper().apply(
+        lambda p: 1 if any(f in str(p) for f in ["C","L","R","W","F"]) else 0
+    )
+    pos_map = dict(zip(pl["player_id"], pl["is_forward"]))
+    forwards = sum(v == 1 for v in pos_map.values())
+    print(f"  {len(pos_map):,} players mapped: {forwards} forwards, "
+          f"{len(pos_map)-forwards} defensemen")
+    return pos_map
+
+
+def load_and_prepare(path, pos_map):
+    print("\nLoading shot data...")
+    df = pd.read_csv(path, low_memory=False)
+    print(f"  Total shots: {len(df):,}")
+
+    # Map shooter position
+    df["is_forward"] = df["shooter_id"].map(pos_map).fillna(1)  # default to forward if unknown
+    print(f"  Position mapped: {df['is_forward'].notna().sum():,} "
+          f"(unknown defaulted to forward: {df['shooter_id'].map(pos_map).isna().sum():,})")
+
+    # Rush flag: high speed from distant previous event
+    df["is_rush"] = (
+        (df["speed_from_prev"].fillna(0) > RUSH_SPEED_THRESHOLD) &
+        (df["prev_distance"].fillna(0) > RUSH_PREV_DIST_THRESHOLD)
+    ).astype(int)
+    print(f"  Rush shots: {df['is_rush'].sum():,} ({df['is_rush'].mean():.1%})")
+
+    # Train only on shots on goal and goals
     df_train = df[df["event_type"].isin(["shot-on-goal", "goal"])].copy()
     df_missed = df[df["event_type"] == "missed-shot"].copy()
-    print(f"  Shots on goal + goals (training data): {len(df_train)}")
-    print(f"  Missed shots (xG applied after training): {len(df_missed)}")
-    df = df_train
+    print(f"  SOG + goals: {len(df_train):,} | Missed: {len(df_missed):,}")
 
-    # Separate empty net shots - handled by separate EN xG model
-    df_empty_net = df[df["is_empty_net"] == 1].copy()
+    # Separate empty net
+    df_empty_net        = df_train[df_train["is_empty_net"] == 1].copy()
     df_empty_net_missed = df_missed[df_missed["is_empty_net"] == 1].copy()
-    df = df[df["is_empty_net"] == 0].copy()
+    df_train = df_train[df_train["is_empty_net"] == 0].copy()
     df_missed = df_missed[df_missed["is_empty_net"] == 0].copy()
-    print(f"  After removing empty net shots from training: {len(df)}")
-    print(f"  Empty net SOG/goals: {len(df_empty_net)}, missed: {len(df_empty_net_missed)}")
+    print(f"  After removing EN — SOG+goals: {len(df_train):,} | Missed: {len(df_missed):,}")
 
     # Drop rows missing key features
-    df = df.dropna(subset=["distance", "angle"]).copy()
-    print(f"  After dropping missing key features: {len(df)}")
+    df_train = df_train.dropna(subset=["distance", "angle"]).copy()
 
     # Fill missing features
-    df["speed_from_prev"] = df["speed_from_prev"].fillna(0)
-    df["prev_distance"] = df["prev_distance"].fillna(0)
-    df["rebound_angle_change"] = df["rebound_angle_change"].fillna(0)
-    df["is_rebound"] = df["is_rebound"].fillna(0)
+    for col in ["speed_from_prev", "prev_distance", "rebound_angle_change", "is_rebound"]:
+        df_train[col] = df_train[col].fillna(0)
 
     # Encode shot type
-    df["shot_type"] = df["shot_type"].fillna("unknown")
+    df_train["shot_type"] = df_train["shot_type"].fillna("unknown")
     shot_type_encoder = LabelEncoder()
-    df["shot_type_enc"] = shot_type_encoder.fit_transform(df["shot_type"])
+    df_train["shot_type_enc"] = shot_type_encoder.fit_transform(df_train["shot_type"])
 
     # Encode prev event type
-    df["prev_event_type"] = df["prev_event_type"].fillna("unknown")
+    df_train["prev_event_type"] = df_train["prev_event_type"].fillna("unknown")
     prev_event_encoder = LabelEncoder()
-    df["prev_event_type_enc"] = prev_event_encoder.fit_transform(df["prev_event_type"])
+    df_train["prev_event_type_enc"] = prev_event_encoder.fit_transform(df_train["prev_event_type"])
 
-    # Period - cap at 4
-    df["period_adj"] = df["period"].clip(upper=4)
+    # Period — cap at 4
+    df_train["period_adj"] = df_train["period"].clip(upper=4)
 
-    print(f"\nGoal rate in filtered dataset: {df['is_goal'].mean()*100:.1f}%")
-    print(f"Total goals: {df['is_goal'].sum()}")
+    print(f"\n  Goal rate: {df_train['is_goal'].mean()*100:.2f}%")
+    print(f"  Rush shot goal rate: {df_train[df_train['is_rush']==1]['is_goal'].mean()*100:.2f}%")
+    print(f"  Non-rush goal rate:  {df_train[df_train['is_rush']==0]['is_goal'].mean()*100:.2f}%")
+    print(f"  Forward goal rate:   {df_train[df_train['is_forward']==1]['is_goal'].mean()*100:.2f}%")
+    print(f"  Defense goal rate:   {df_train[df_train['is_forward']==0]['is_goal'].mean()*100:.2f}%")
 
-    return df, df_missed, df_empty_net, df_empty_net_missed, shot_type_encoder, prev_event_encoder
+    return (df_train, df_missed, df_empty_net, df_empty_net_missed,
+            shot_type_encoder, prev_event_encoder)
 
 
 def build_features(df):
-    """Select and return feature matrix."""
     features = [
         "distance",
         "angle",
@@ -76,308 +105,255 @@ def build_features(df):
         "prev_distance",
         "prev_event_type_enc",
         "period_adj",
-        # Deliberately excluding strength_enc - xG should be location/context based
+        "is_forward",   # NEW: forward vs defenseman
+        "is_rush",      # NEW: rush shot flag
     ]
-    return df[features], df["is_goal"]
+    available = [f for f in features if f in df.columns]
+    return df[available], df["is_goal"]
 
 
-def evaluate_model(model, X_test, y_test):
-    """Print model evaluation metrics."""
-    y_pred_proba = model.predict_proba(X_test)[:, 1]
-    auc = roc_auc_score(y_test, y_pred_proba)
-    ll = log_loss(y_test, y_pred_proba)
-    brier = brier_score_loss(y_test, y_pred_proba)
-    print(f"\nModel Evaluation:")
-    print(f"  AUC-ROC:     {auc:.4f}  (higher is better, 0.5 = random)")
-    print(f"  Log Loss:    {ll:.4f}  (lower is better)")
-    print(f"  Brier Score: {brier:.4f}  (lower is better, 0 = perfect)")
-    print(f"  Baseline log loss: {log_loss(y_test, [y_test.mean()]*len(y_test)):.4f}")
-    return y_pred_proba
+def platt_calibrate(model, X_cal, y_cal):
+    """Platt scaling — logistic regression on top of XGBoost raw log-odds.
+    Better than isotonic regression for tail calibration."""
+    raw_probs = model.predict_proba(X_cal)[:, 1]
+    # Use log-odds as input to logistic regression
+    eps = 1e-6
+    log_odds = np.log(raw_probs / (1 - raw_probs + eps) + eps)
+    lr = LogisticRegression(random_state=42)
+    lr.fit(log_odds.reshape(-1, 1), y_cal)
+    print(f"  Platt scaling coefficients: a={lr.coef_[0][0]:.4f}, b={lr.intercept_[0]:.4f}")
+    return lr
 
 
-def print_feature_importance(model, feature_names):
-    """Print feature importances."""
-    importance = model.feature_importances_
-    importance_df = pd.DataFrame({
-        "feature": feature_names,
-        "importance": importance
-    }).sort_values("importance", ascending=False)
-    print("\nFeature Importances:")
-    for _, row in importance_df.iterrows():
-        bar = "█" * int(row["importance"] * 100)
-        print(f"  {row['feature']:<25} {row['importance']:.4f} {bar}")
+def apply_platt(calibrator, raw_probs):
+    eps = 1e-6
+    log_odds = np.log(raw_probs / (1 - raw_probs + eps) + eps)
+    return calibrator.predict_proba(log_odds.reshape(-1, 1))[:, 1]
 
 
-def build_empty_net_xg_model(df_empty_net_all, shot_type_encoder):
-    """
-    Train a separate xG model for empty net shots using logistic regression.
-    Trained on unblocked EN shots (SOG + goals + missed shots).
-    """
+def evaluate_calibration(y_true, y_pred, label=""):
+    """Print calibration by bucket."""
+    df_eval = pd.DataFrame({"y": y_true, "p": y_pred})
+    df_eval["bucket"] = pd.cut(df_eval["p"],
+        bins=[0,.05,.10,.15,.20,.30,.40,.60,1.0])
+    cal = df_eval.groupby("bucket").agg(
+        shots=("y","count"),
+        actual=("y","mean"),
+        predicted=("p","mean"),
+    ).dropna()
+    cal["error"] = cal["predicted"] - cal["actual"]
+    print(f"\nCalibration {label}:")
+    print(cal.to_string())
+    return cal
+
+
+def build_empty_net_model(df_empty_net_all, shot_type_encoder, pos_map):
     print("\nBuilding empty net xG model...")
-
     en = df_empty_net_all[df_empty_net_all["event_type"].isin(
         ["shot-on-goal", "goal", "missed-shot"])].copy()
 
-    print(f"  Empty net unblocked attempts: {len(en)}")
-    print(f"  Empty net goal rate: {en['is_goal'].mean():.3f}")
-
-    # Encode shot type
+    en["is_forward"] = en["shooter_id"].map(pos_map).fillna(1)
     en["shot_type"] = en["shot_type"].fillna("unknown")
-    known_types = set(shot_type_encoder.classes_)
+    known = set(shot_type_encoder.classes_)
     en["shot_type_enc"] = en["shot_type"].apply(
-        lambda x: shot_type_encoder.transform([x])[0] if x in known_types else 0
-    )
-
-    # Fill missing features
-    en["speed_from_prev"] = en["speed_from_prev"].fillna(0)
-    en["is_rebound"] = en["is_rebound"].fillna(0)
-    en["rebound_angle_change"] = en["rebound_angle_change"].fillna(0)
+        lambda x: shot_type_encoder.transform([x])[0] if x in known else 0)
+    for col in ["speed_from_prev","is_rebound","rebound_angle_change"]:
+        en[col] = en[col].fillna(0)
     en["period_adj"] = en["period"].clip(upper=4)
-    en = en.dropna(subset=["distance", "angle"]).copy()
+    en = en.dropna(subset=["distance","angle"]).copy()
 
-    features = [
-        "distance",
-        "angle",
-        "shot_type_enc",
-        "is_rebound",
-        "speed_from_prev",
-        "rebound_angle_change",
-        "period_adj",
-    ]
-
+    features = ["distance","angle","shot_type_enc","is_rebound",
+                "speed_from_prev","rebound_angle_change","period_adj","is_forward"]
     X = en[features].fillna(0)
     y = en["is_goal"]
 
-    # Train/test split by season
     test_mask = en["season"] == 20252026
-    X_train, X_test = X[~test_mask], X[test_mask]
-    y_train, y_test = y[~test_mask], y[test_mask]
+    X_tr, X_te = X[~test_mask], X[test_mask]
+    y_tr, y_te = y[~test_mask], y[test_mask]
 
-    print(f"  Train: {len(X_train)} shots ({y_train.sum()} goals)")
-    print(f"  Test:  {len(X_test)} shots ({y_test.sum()} goals)")
-
-    # Scale and train
     scaler = StandardScaler()
-    X_train_scaled = scaler.fit_transform(X_train)
-    X_test_scaled = scaler.transform(X_test)
+    X_tr_s = scaler.fit_transform(X_tr)
+    X_te_s  = scaler.transform(X_te)
 
     model = LogisticRegression(max_iter=1000, random_state=42)
-    model.fit(X_train_scaled, y_train)
+    model.fit(X_tr_s, y_tr)
 
-    y_pred = model.predict_proba(X_test_scaled)[:, 1]
-    auc = roc_auc_score(y_test, y_pred)
-    ll = log_loss(y_test, y_pred)
-    baseline_ll = log_loss(y_test, [y_test.mean()] * len(y_test))
-    print(f"  AUC: {auc:.4f} | LogLoss: {ll:.4f} (baseline: {baseline_ll:.4f})")
-
-    coef_df = pd.DataFrame({
-        "feature": features,
-        "coefficient": model.coef_[0]
-    }).sort_values("coefficient", ascending=False)
-    print("\n  Feature coefficients:")
-    for _, row in coef_df.iterrows():
-        print(f"    {row['feature']:<25} {row['coefficient']:+.3f}")
+    y_pred = model.predict_proba(X_te_s)[:, 1]
+    auc = roc_auc_score(y_te, y_pred)
+    ll  = log_loss(y_te, y_pred)
+    baseline_ll = log_loss(y_te, [y_te.mean()]*len(y_te))
+    print(f"  EN model — AUC: {auc:.4f} | LogLoss: {ll:.4f} (baseline: {baseline_ll:.4f})")
+    print(f"  EN goal rate: {y_te.mean():.3f} | Mean pred: {y_pred.mean():.3f}")
 
     return model, scaler, features
 
 
-def apply_empty_net_xg(df_empty_net_all, en_model, en_scaler, en_features, shot_type_encoder):
-    """Apply empty net xG model to all empty net shots."""
-    df = df_empty_net_all.copy()
-
+def apply_empty_net_xg(df_en_all, en_model, en_scaler, en_features,
+                        shot_type_encoder, pos_map):
+    df = df_en_all.copy()
+    df["is_forward"] = df["shooter_id"].map(pos_map).fillna(1)
     df["shot_type"] = df["shot_type"].fillna("unknown")
-    known_types = set(shot_type_encoder.classes_)
+    known = set(shot_type_encoder.classes_)
     df["shot_type_enc"] = df["shot_type"].apply(
-        lambda x: shot_type_encoder.transform([x])[0] if x in known_types else 0
-    )
-
-    df["speed_from_prev"] = df["speed_from_prev"].fillna(0)
-    df["is_rebound"] = df["is_rebound"].fillna(0)
-    df["rebound_angle_change"] = df["rebound_angle_change"].fillna(0)
+        lambda x: shot_type_encoder.transform([x])[0] if x in known else 0)
+    for col in ["speed_from_prev","is_rebound","rebound_angle_change"]:
+        df[col] = df[col].fillna(0)
     df["period_adj"] = df["period"].clip(upper=4)
     df["distance"] = df["distance"].fillna(30)
-    df["angle"] = df["angle"].fillna(15)
-
+    df["angle"]    = df["angle"].fillna(15)
     X = df[en_features].fillna(0)
-    X_scaled = en_scaler.transform(X)
-    df["xg"] = en_model.predict_proba(X_scaled)[:, 1]
-
-    print(f"  EN xG mean: {df['xg'].mean():.3f}  "
-          f"Actual goal rate: {df['is_goal'].mean():.3f}")
-
+    X_s = en_scaler.transform(X)
+    df["xg"] = en_model.predict_proba(X_s)[:, 1]
+    print(f"  EN xG mean: {df['xg'].mean():.3f} | Actual goal rate: {df['is_goal'].mean():.3f}")
     return df
 
 
 def main():
-    # Load and prepare data
-    df, df_missed, df_empty_net, df_empty_net_missed, \
-        shot_type_encoder, prev_event_encoder = load_and_prepare(DATA_PATH)
+    pos_map = build_position_map(PLAYER_PATH)
 
-    # Build features
+    df, df_missed, df_empty_net, df_empty_net_missed, \
+        shot_type_encoder, prev_event_encoder = load_and_prepare(DATA_PATH, pos_map)
+
     print("\nBuilding features...")
     X, y = build_features(df)
     feature_names = X.columns.tolist()
+    print(f"  Features: {feature_names}")
 
-    # Season window comparison
-    print("\nComparing training windows...")
+    # Train/test split
     test_mask = df["season"] == 20252026
-    X_test = X[test_mask]
-    y_test = y[test_mask]
+    X_test, y_test = X[test_mask], y[test_mask]
 
+    # Compare training windows
+    print("\nComparing training windows...")
     windows = {
-        "20222023+20232024+20242025 (3 seasons)": df["season"].isin([20222023, 20232024, 20242025]),
-        "20232024+20242025 (2 seasons)":          df["season"].isin([20232024, 20242025]),
-        "20242025 only (1 season)":               df["season"] == 20242025,
-        "20222023 only (oldest season)":          df["season"] == 20222023,
+        "3 seasons (20222023-20242025)": df["season"].isin([20222023,20232024,20242025]),
+        "2 seasons (20232024-20242025)": df["season"].isin([20232024,20242025]),
+        "1 season  (20242025)":          df["season"] == 20242025,
     }
 
-    best_auc = 0
-    best_model = None
-    best_label = None
-
+    best_auc, best_model, best_label = 0, None, None
     for label, train_mask in windows.items():
         train_mask = train_mask & ~test_mask
-        X_train = X[train_mask]
-        y_train = y[train_mask]
-
-        print(f"\n  [{label}]")
-        print(f"  Train: {len(X_train)} shots ({y_train.sum()} goals)")
-
+        X_tr, y_tr = X[train_mask], y[train_mask]
         m = xgb.XGBClassifier(
-            n_estimators=500,
-            max_depth=5,
-            learning_rate=0.05,
-            subsample=0.8,
-            colsample_bytree=0.8,
-            scale_pos_weight=(y_train == 0).sum() / (y_train == 1).sum(),
-            eval_metric="logloss",
-            early_stopping_rounds=20,
-            random_state=42,
-            n_jobs=-1,
+            n_estimators=500, max_depth=5, learning_rate=0.05,
+            subsample=0.8, colsample_bytree=0.8,
+            scale_pos_weight=(y_tr==0).sum()/(y_tr==1).sum(),
+            eval_metric="logloss", early_stopping_rounds=20,
+            random_state=42, n_jobs=-1,
         )
-        m.fit(X_train, y_train, eval_set=[(X_test, y_test)], verbose=False)
-
+        m.fit(X_tr, y_tr, eval_set=[(X_test, y_test)], verbose=False)
         y_pred = m.predict_proba(X_test)[:, 1]
         auc = roc_auc_score(y_test, y_pred)
-        ll = log_loss(y_test, y_pred)
-        brier = brier_score_loss(y_test, y_pred)
-        print(f"  AUC: {auc:.4f} | Log Loss: {ll:.4f} | Brier: {brier:.4f}")
-
+        ll  = log_loss(y_test, y_pred)
+        print(f"  [{label}] AUC: {auc:.4f} | LogLoss: {ll:.4f}")
         if auc > best_auc:
-            best_auc = auc
-            best_model = m
-            best_label = label
+            best_auc, best_model, best_label = auc, m, label
 
-    print(f"\nBest training window: {best_label} (AUC: {best_auc:.4f})")
+    print(f"\nBest window: {best_label} (AUC: {best_auc:.4f})")
     model = best_model
 
-    # Final evaluation
-    print("\n--- Final Model Evaluation ---")
-    y_pred_proba = evaluate_model(model, X_test, y_test)
-    print_feature_importance(model, feature_names)
+    # Feature importances
+    print("\nFeature importances:")
+    fi = pd.Series(model.feature_importances_, index=feature_names).sort_values(ascending=False)
+    for f, v in fi.items():
+        print(f"  {f:<30} {v:.4f}  {'█'*int(v*100)}")
 
     # Retrain on all non-test data
-    print(f"\nRetraining best model on all data excluding 20252026 test set...")
-    final_train_mask = ~test_mask
-    X_final = X[final_train_mask]
-    y_final = y[final_train_mask]
+    print(f"\nRetraining on all non-test data...")
+    final_mask = ~test_mask
+    X_final, y_final = X[final_mask], y[final_mask]
     model.set_params(early_stopping_rounds=None)
     model.fit(X_final, y_final, verbose=False)
-    print(f"  Final train set: {len(X_final)} shots ({y_final.sum()} goals)")
 
-    # Calibrate probabilities
-    print("\nCalibrating xG probabilities...")
+    # Platt calibration (better tail calibration than isotonic)
+    print("\nApplying Platt scaling calibration...")
     cal_split = int(len(X_final) * 0.8)
-    X_cal = X_final.iloc[cal_split:]
-    y_cal = y_final.iloc[cal_split:]
-    raw_probs = model.predict_proba(X_cal)[:, 1]
+    X_cal, y_cal = X_final.iloc[cal_split:], y_final.iloc[cal_split:]
+    calibrator = platt_calibrate(model, X_cal, y_cal)
 
-    calibrator = IsotonicRegression(out_of_bounds="clip")
-    calibrator.fit(raw_probs, y_cal)
+    # Evaluate calibration before and after
+    raw_test  = model.predict_proba(X_test)[:, 1]
+    cal_test  = apply_platt(calibrator, raw_test)
+    print(f"\nTest set metrics:")
+    print(f"  AUC (raw):        {roc_auc_score(y_test, raw_test):.4f}")
+    print(f"  AUC (calibrated): {roc_auc_score(y_test, cal_test):.4f}")
+    print(f"  LogLoss (raw):    {log_loss(y_test, raw_test):.4f}")
+    print(f"  LogLoss (cal):    {log_loss(y_test, cal_test):.4f}")
+    print(f"  Mean xG (raw):    {raw_test.mean():.4f}")
+    print(f"  Mean xG (cal):    {cal_test.mean():.4f}")
+    print(f"  Actual goal rate: {y_test.mean():.4f}")
 
-    print(f"  Raw prob mean: {raw_probs.mean():.4f}  Actual goal rate: {y_cal.mean():.4f}")
-    cal_probs = calibrator.predict(raw_probs)
-    print(f"  Calibrated prob mean: {cal_probs.mean():.4f}")
+    evaluate_calibration(y_test.values, raw_test, label="(raw)")
+    evaluate_calibration(y_test.values, cal_test, label="(Platt calibrated)")
 
-    cal_path = os.path.join(MODEL_DIR, "xg_calibrator.pkl")
-    with open(cal_path, "wb") as f:
-        pickle.dump(calibrator, f)
-    print(f"  Calibrator saved to {cal_path}")
+    # Apply calibrated xG to all shots
+    print("\nApplying xG to full dataset...")
+    raw_all = model.predict_proba(X)[:, 1]
+    df["xg"] = np.clip(apply_platt(calibrator, raw_all), 0.001, 0.95)
 
-    # Apply calibrated xG to training shots (SOG + goals, non-empty-net)
-    print("\nGenerating calibrated xG values for full dataset...")
-    raw_xg = model.predict_proba(X)[:, 1]
-    df["xg"] = np.clip(calibrator.predict(raw_xg), 0.001, 0.95)
-
-    # Apply xG to missed shots (non-empty-net)
+    # Apply to missed shots
     df_missed = df_missed[df_missed["distance"].notna() & df_missed["angle"].notna()].copy()
+    df_missed["is_forward"] = df_missed["shooter_id"].map(pos_map).fillna(1)
+    df_missed["is_rush"] = (
+        (df_missed["speed_from_prev"].fillna(0) > RUSH_SPEED_THRESHOLD) &
+        (df_missed["prev_distance"].fillna(0)   > RUSH_PREV_DIST_THRESHOLD)
+    ).astype(int)
     df_missed["shot_type"] = df_missed["shot_type"].fillna("unknown")
     df_missed["shot_type_enc"] = df_missed["shot_type"].map(
         dict(zip(shot_type_encoder.classes_,
-                 shot_type_encoder.transform(shot_type_encoder.classes_)))
-    ).fillna(0)
+                 shot_type_encoder.transform(shot_type_encoder.classes_)))).fillna(0)
     df_missed["prev_event_type"] = df_missed["prev_event_type"].fillna("unknown")
     df_missed["prev_event_type_enc"] = df_missed["prev_event_type"].map(
         dict(zip(prev_event_encoder.classes_,
-                 prev_event_encoder.transform(prev_event_encoder.classes_)))
-    ).fillna(0)
+                 prev_event_encoder.transform(prev_event_encoder.classes_)))).fillna(0)
     df_missed["period_adj"] = df_missed["period"].clip(upper=4)
-    df_missed["speed_from_prev"] = df_missed["speed_from_prev"].fillna(0)
-    df_missed["prev_distance"] = df_missed["prev_distance"].fillna(0)
-    df_missed["rebound_angle_change"] = df_missed["rebound_angle_change"].fillna(0)
-    df_missed["is_rebound"] = df_missed["is_rebound"].fillna(0)
+    for col in ["speed_from_prev","prev_distance","rebound_angle_change","is_rebound"]:
+        df_missed[col] = df_missed[col].fillna(0)
     X_missed, _ = build_features(df_missed)
     raw_missed = model.predict_proba(X_missed)[:, 1]
-    df_missed["xg"] = np.clip(calibrator.predict(raw_missed), 0.001, 0.95)
+    df_missed["xg"] = np.clip(apply_platt(calibrator, raw_missed), 0.001, 0.95)
 
-    # Build and apply empty net xG model
-    df_empty_net_all = pd.concat([df_empty_net, df_empty_net_missed], ignore_index=True)
-    en_model, en_scaler, en_features = build_empty_net_xg_model(
-        df_empty_net_all, shot_type_encoder
-    )
-    df_empty_net_with_xg = apply_empty_net_xg(
-        df_empty_net_all, en_model, en_scaler, en_features, shot_type_encoder
-    )
+    # Empty net model
+    df_en_all = pd.concat([df_empty_net, df_empty_net_missed], ignore_index=True)
+    en_model, en_scaler, en_features = build_empty_net_model(
+        df_en_all, shot_type_encoder, pos_map)
+    df_en_xg = apply_empty_net_xg(
+        df_en_all, en_model, en_scaler, en_features, shot_type_encoder, pos_map)
 
-    # Save EN model
-    with open(os.path.join(MODEL_DIR, "xg_en_model.pkl"), "wb") as f:
-        pickle.dump({
-            "model": en_model,
-            "scaler": en_scaler,
-            "features": en_features
-        }, f)
-    print("  Empty net model saved to xg_en_model.pkl")
+    # League calibration check
+    test_sog = df[test_mask & (df["is_on_goal"]==1)]
+    print(f"\nLeague calibration check (test season SOG):")
+    print(f"  Total xG:    {test_sog['xg'].sum():.1f}")
+    print(f"  Total goals: {test_sog['is_goal'].sum():.1f}")
+    print(f"  xG/goal:     {test_sog['xg'].sum()/test_sog['is_goal'].sum():.3f}")
 
     # Combine all shots
-    df_all = pd.concat([df, df_missed, df_empty_net_with_xg], ignore_index=True)
-    df_all = df_all.sort_values(["game_id", "period", "time_seconds"]).reset_index(drop=True)
+    df_all = pd.concat([df, df_missed, df_en_xg], ignore_index=True)
+    df_all = df_all.sort_values(["game_id","period","time_seconds"]).reset_index(drop=True)
 
-    # Sanity check
-    print("\nTop 10 highest xG shots (non-empty-net):")
-    top_xg = df.nlargest(10, "xg")[["date", "shooting_team", "shot_type",
-                                     "distance", "angle", "is_rebound",
-                                     "is_goal", "xg"]]
-    print(top_xg.to_string())
+    print(f"\nFinal dataset: {len(df_all):,} shots")
 
-    print("\nxG summary by shot type:")
-    sog = df_all[df_all["is_on_goal"] == 1]
-    print(f"  Mean xG per SOG: {sog['xg'].mean():.4f}")
-    print(f"  Expected goals per game per team (30 SOG): {30 * sog['xg'].mean():.2f}")
-
-    # Save model and encoders
-    print("\nSaving model...")
+    # Save everything
+    print("\nSaving models...")
     model.save_model(os.path.join(MODEL_DIR, "xg_model.json"))
+
+    with open(os.path.join(MODEL_DIR, "xg_calibrator.pkl"), "wb") as f:
+        pickle.dump(calibrator, f)
+
+    with open(os.path.join(MODEL_DIR, "xg_en_model.pkl"), "wb") as f:
+        pickle.dump({"model": en_model, "scaler": en_scaler, "features": en_features}, f)
+
     with open(os.path.join(MODEL_DIR, "xg_encoders.pkl"), "wb") as f:
         pickle.dump({
-            "shot_type_encoder": shot_type_encoder,
-            "prev_event_encoder": prev_event_encoder,
+            "shot_type_encoder":   shot_type_encoder,
+            "prev_event_encoder":  prev_event_encoder,
+            "pos_map":             pos_map,
         }, f)
 
-    xg_output_path = os.path.expanduser("~/nhl-props/data/processed/shot_data_with_xg.csv")
-    os.makedirs(os.path.dirname(xg_output_path), exist_ok=True)
-    df_all.to_csv(xg_output_path, index=False)
-    print(f"Shot data with xG saved to {xg_output_path}")
-
+    out_path = os.path.expanduser("~/nhl-props/data/processed/shot_data_with_xg.csv")
+    df_all.to_csv(out_path, index=False)
+    print(f"  Saved shot_data_with_xg.csv ({len(df_all):,} rows)")
     print("\nDone!")
 
 
