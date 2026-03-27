@@ -11,6 +11,8 @@ warnings.filterwarnings("ignore")
 DATA_PATH = os.path.expanduser("~/nhl-props/data/processed/team_features.csv")
 MODEL_DIR = os.path.expanduser("~/nhl-props/models/team")
 
+LEAGUE_AVG_SH_SHOTS_PER60 = 11.5
+
 def load_models():
     print("Loading models...")
     models = {}
@@ -116,7 +118,6 @@ def build_matchup_row(df, home_team, away_team, game_date=None):
                                                    "weighted_"]):
                     result[f"{new_prefix}_{col_suffix}"] = row[col]
                 else:
-                    # Substitute raw per-60 with cumulative season rate
                     for suffix in ["_per60_cumulative_season", "_per60_last20",
                                    "_per60_last30", "_season_avg"]:
                         sub_col = f"{source_prefix}_{col_suffix.replace('_per60','')}{suffix}"
@@ -165,9 +166,44 @@ def poisson_distribution(lam, max_k=15):
     return [stats.poisson.pmf(k, lam) for k in range(max_k + 1)]
 
 
-def normal_thresholds(mu, sigma, thresholds):
-    return {f"over_{t}": float(1 - stats.norm.cdf(t, mu, sigma))
-            for t in thresholds}
+def format_normal(mu, sigma, thresholds):
+    lines = [
+        f"  Projected: {mu:.1f} (±{sigma:.1f})",
+        f"  68% range: {mu-sigma:.1f} to {mu+sigma:.1f}",
+    ]
+    thresh_str = "  "
+    for t in thresholds:
+        prob = float(1 - stats.norm.cdf(t, mu, sigma))
+        thresh_str += f"Over {t}: {prob:.1%}  "
+    lines.append(thresh_str)
+    return "\n".join(lines)
+
+
+def format_shots(mu, sigma, book_lines=None):
+    """Format shots output with over/under probs centered on projection."""
+    if book_lines is None:
+        book_lines = [24.5, 29.5, 34.5]
+    lines = [
+        f"  Projected: {mu:.1f} (±{sigma:.1f})",
+        f"  68% range: {mu-sigma:.1f} to {mu+sigma:.1f}",
+    ]
+    fixed_str = "  Book lines:  "
+    for t in book_lines:
+        over  = float(1 - stats.norm.cdf(t, mu, sigma))
+        under = 1 - over
+        fixed_str += f"o{t}: {over:.1%} / u{t}: {under:.1%}    "
+    lines.append(fixed_str)
+
+    center  = round(mu * 2) / 2
+    dynamic = [center + 0.5*i for i in range(-5, 6) if (center + 0.5*i) % 1 == 0.5]
+    lines.append(f"  {'Line':<8} {'Over':>7} {'Under':>7}")
+    lines.append(f"  {'-'*24}")
+    for t in dynamic:
+        over  = float(1 - stats.norm.cdf(t, mu, sigma))
+        under = 1 - over
+        marker = " ◀" if abs(t - mu) < 0.5 else ""
+        lines.append(f"  {t:<8.1f} {over:>7.1%} {under:>7.1%}{marker}")
+    return "\n".join(lines)
 
 
 def format_poisson(lam, probs):
@@ -186,20 +222,6 @@ def format_poisson(lam, probs):
     return "\n".join(lines)
 
 
-def format_normal(mu, sigma, thresholds):
-    lines = [
-        f"  Projected: {mu:.1f} (±{sigma:.1f})",
-        f"  68% range: {mu-sigma:.1f} to {mu+sigma:.1f}",
-        f"  90% range: {mu-1.645*sigma:.1f} to {mu+1.645*sigma:.1f}",
-    ]
-    thresh_str = "  "
-    for t in thresholds:
-        prob = float(1 - stats.norm.cdf(t, mu, sigma))
-        thresh_str += f"Over {t}: {prob:.1%}  "
-    lines.append(thresh_str)
-    return "\n".join(lines)
-
-
 def predict_game(home_team, away_team, game_date=None, verbose=True):
     df = pd.read_csv(DATA_PATH)
     df["date"] = pd.to_datetime(df["date"])
@@ -208,13 +230,13 @@ def predict_game(home_team, away_team, game_date=None, verbose=True):
 
     models, feature_lists, residual_stds = load_models()
 
-    # Game-level constants from data
     AVG_GAME_TOI = float(
         (df["home_ev_toi"] + df["home_pp_toi"] + df["home_sh_toi"]).mean()
     )
     AVG_EN_TOI = float(df["home_en_toi"].mean())
-    LEAGUE_AVG_PP_TOI = float(df["home_pp_toi"].mean())
+    LEAGUE_AVG_PP_TOI   = float(df["home_pp_toi"].mean())
     LEAGUE_AVG_PP_SHOTS = float(df["home_pp_shots_on_goal_for"].mean())
+    LEAGUE_AVG_PP_PER60 = LEAGUE_AVG_PP_SHOTS / (LEAGUE_AVG_PP_TOI / 60)
     LEAGUE_AVG_MINOR_DRAWN = float(
         df["home_total_minor_penalties_drawn_season_avg"].dropna().mean()
     )
@@ -248,8 +270,7 @@ def predict_game(home_team, away_team, game_date=None, verbose=True):
                 "over_4.5": 1 - sum(probs[:5]),
             }
 
-    # --- Step 3: PP TOI (empirical ridge regression formula) ---
-    # PP TOI = 0.87 + own_drawn×0.219 + opp_taken×0.606 + own_pp_toi_season×0.251
+    # --- Step 3: PP TOI ---
     def calc_pp_toi(own_drawn, opp_taken, own_pp_toi_season):
         own_drawn = float(own_drawn) if own_drawn is not None and not pd.isna(own_drawn) else LEAGUE_AVG_MINOR_DRAWN
         opp_taken = float(opp_taken) if opp_taken is not None and not pd.isna(opp_taken) else LEAGUE_AVG_MINOR_TAKEN
@@ -271,16 +292,13 @@ def predict_game(home_team, away_team, game_date=None, verbose=True):
     predictions["home_sh_toi"] = predictions["away_pp_toi"]
     predictions["away_sh_toi"] = predictions["home_pp_toi"]
 
-    # --- Step 5: EV TOI = avg game TOI - PP TOI - SH TOI ---
+    # --- Step 5: EV TOI ---
     for side in ["home", "away"]:
         pp = predictions[f"{side}_pp_toi"]
         sh = predictions[f"{side}_sh_toi"]
         predictions[f"{side}_ev_toi"] = max(AVG_GAME_TOI - pp - sh, 30.0)
 
-    # --- Step 6: Total shots (empirical formula, beats XGBoost) ---
-    # own_last30 × 0.55 + opp_shots_against_last30 × 0.45
-    # Derived from 13,192 game observations across 6 seasons
-    # MAE 5.002 vs XGBoost 5.378
+    # --- Step 6: Individual team total shots ---
     LEAGUE_AVG_SHOTS = float(df["home_total_shots_on_goal_for"].mean())
 
     for side, opp_side in [("home", "away"), ("away", "home")]:
@@ -294,22 +312,21 @@ def predict_game(home_team, away_team, game_date=None, verbose=True):
 
         total = 0.55 * float(own_l30) + 0.45 * float(opp_against_l30)
 
-       # Back-calculate EV shots = total - PP shots - SH shots
-        # Method: cumulative season PP shots/60 × predicted PP TOI
-        # Beats flat season_avg (MAE 2.644 vs 2.739, bias -0.156 vs +0.203)
-        LEAGUE_AVG_PP_PER60 = LEAGUE_AVG_PP_SHOTS / (LEAGUE_AVG_PP_TOI / 60)
+        # PP shots: cumulative per60 × predicted PP TOI
         pp_per60_cum = row.get(f"{side}_pp_shots_on_goal_for_per60_cumulative_season")
         if pp_per60_cum is None or pd.isna(pp_per60_cum):
             pp_per60_cum = LEAGUE_AVG_PP_PER60
         pp_toi = predictions[f"{side}_pp_toi"]
         pp_shots = float(pp_per60_cum) * (pp_toi / 60)
+
+        # SH shots
         sh_toi = predictions[f"{side}_sh_toi"]
         weighted_sh = row.get(f"{side}_weighted_sh_shots_on_goal_for_per60")
-        if weighted_sh is None or pd.isna(weighted_sh): weighted_sh = LEAGUE_AVG_SH_SHOTS_PER60
+        if weighted_sh is None or pd.isna(weighted_sh):
+            weighted_sh = LEAGUE_AVG_SH_SHOTS_PER60
         sh_shots = float(weighted_sh) * (sh_toi / 60)
-        ev_shots = max(total - pp_shots - sh_shots, 0)
 
-        # Sigma from residual std of EV shots model (still valid for uncertainty)
+        ev_shots = max(total - pp_shots - sh_shots, 0)
         ev_toi = predictions[f"{side}_ev_toi"]
         sigma = residual_stds.get(f"{side}_ev_shots_on_goal_for_per60", 5.0)
         sigma_total = sigma * (ev_toi / 60)
@@ -318,27 +335,9 @@ def predict_game(home_team, away_team, game_date=None, verbose=True):
             "total": total, "ev_shots": ev_shots,
             "pp_shots": pp_shots, "sh_shots": sh_shots,
             "sigma": sigma_total,
-            **normal_thresholds(total, sigma_total, [19.5, 24.5, 27.5, 29.5, 32.5, 34.5])
         }
 
-    # --- Step 7: EV shot attempts (model prediction still useful) ---
-    for side in ["home", "away"]:
-        target = f"{side}_ev_shot_attempts_for_per60"
-        if target in models:
-            ev_attempts_per60 = predict_stat(
-                models[target], feature_lists[target], row, "regression")
-            ev_toi = predictions[f"{side}_ev_toi"]
-            ev_attempts = ev_attempts_per60 * (ev_toi / 60)
-            sigma_attempts = residual_stds.get(target, ev_attempts * 0.15)
-            sigma_attempts_total = sigma_attempts * (ev_toi / 60)
-            predictions[f"{side}_ev_attempts"] = {
-                "total": ev_attempts, "per60": ev_attempts_per60,
-                "sigma": sigma_attempts_total,
-                **normal_thresholds(ev_attempts, sigma_attempts_total,
-                                    [20.5, 25.5, 30.5, 35.5, 40.5])
-            }
-
-    # --- Step 8: xG ---
+    # --- Step 7: xG ---
     for side in ["home", "away"]:
         target = f"{side}_xgf_total"
         if target in models:
@@ -346,8 +345,22 @@ def predict_game(home_team, away_team, game_date=None, verbose=True):
             sigma = residual_stds.get(target, xg * 0.20)
             predictions[f"{side}_xg"] = {
                 "total": xg, "sigma": sigma,
-                **normal_thresholds(xg, sigma, [1.5, 2.5, 3.5, 4.5, 5.5])
+                **{f"over_{t}": float(1 - stats.norm.cdf(t, xg, sigma))
+                   for t in [1.5, 2.5, 3.5, 4.5, 5.5]}
             }
+
+   # --- Step 8: Game total shots (naive sum of individual predictions) ---
+    # XGBoost game total model tested but pred std collapses to ~1.1 (unusable).
+    # Naive sum of empirical formula matches near-optimal blend.
+    # Residual std 8.34 from test set (2025-26, 1,136 games).
+    GAME_TOTAL_SIGMA = 8.34
+    home_total = predictions.get("home_total_shots", {}).get("total", 0)
+    away_total = predictions.get("away_total_shots", {}).get("total", 0)
+    game_total = home_total + away_total
+    predictions["game_total_shots"] = {
+        "total": game_total,
+        "sigma": GAME_TOTAL_SIGMA,
+    }
 
     # --- Output ---
     if verbose:
@@ -369,7 +382,7 @@ def predict_game(home_team, away_team, game_date=None, verbose=True):
                 print(f"\n  {team}:")
                 print(format_poisson(g["lambda"], g["probs"]))
 
-        print(f"\nTOTAL SHOTS ON GOAL")
+        print(f"\nINDIVIDUAL SHOTS ON GOAL")
         for side, team in [("home", home_team), ("away", away_team)]:
             s = predictions.get(f"{side}_total_shots", {})
             if s:
@@ -377,17 +390,13 @@ def predict_game(home_team, away_team, game_date=None, verbose=True):
                 print(f"  Breakdown: EV {s['ev_shots']:.1f} + "
                       f"PP {s['pp_shots']:.1f} + "
                       f"SH {s['sh_shots']:.1f} = {s['total']:.1f} total")
-                print(format_normal(s["total"], s["sigma"],
-                                    [19.5, 24.5, 27.5, 29.5, 32.5, 34.5]))
+                print(format_shots(s["total"], s["sigma"]))
 
-        print(f"\nEV SHOT ATTEMPTS (Corsi)")
-        for side, team in [("home", home_team), ("away", away_team)]:
-            a = predictions.get(f"{side}_ev_attempts", {})
-            if a:
-                print(f"\n  {team}:")
-                print(f"  Projected: {a['total']:.1f} ({a['per60']:.1f}/60)")
-                print(format_normal(a["total"], a["sigma"],
-                                    [20.5, 25.5, 30.5, 35.5, 40.5]))
+        print(f"\nGAME TOTAL SHOTS")
+        gt = predictions.get("game_total_shots", {})
+        if gt:
+            print(format_shots(gt["total"], gt["sigma"],
+                               book_lines=[49.5, 54.5, 57.5, 59.5, 64.5]))
 
         print(f"\nEXPECTED GOALS (xG)")
         for side, team in [("home", home_team), ("away", away_team)]:
