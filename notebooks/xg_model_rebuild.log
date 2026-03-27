@@ -1,0 +1,100 @@
+Building position map from player game logs...
+  935 players mapped: 613 forwards, 322 defensemen
+
+Loading shot data...
+  Total shots: 592,795
+  Position mapped: 592,795 (unknown defaulted to forward: 27,428)
+  Rush shots: 18,911 (3.2%)
+  SOG + goals: 295,974 | Missed: 136,739
+  After removing EN — SOG+goals: 287,303 | Missed: 132,938
+
+  Goal rate: 10.38%
+  Rush shot goal rate: 9.52%
+  Non-rush goal rate:  10.41%
+  Forward goal rate:   12.11%
+  Defense goal rate:   5.55%
+
+Building features...
+  Features: ['distance', 'angle', 'shot_type_enc', 'is_rebound', 'rebound_angle_change', 'speed_from_prev', 'prev_distance', 'prev_event_type_enc', 'period_adj', 'is_forward', 'is_rush']
+
+Comparing training windows...
+  [3 seasons (20222023-20242025)] AUC: 0.7593 | LogLoss: 0.5896
+  [2 seasons (20232024-20242025)] AUC: 0.7635 | LogLoss: 0.5862
+  [1 season  (20242025)] AUC: 0.7575 | LogLoss: 0.5647
+
+Best window: 2 seasons (20232024-20242025) (AUC: 0.7635)
+
+Feature importances:
+  distance                       0.2134  █████████████████████
+  is_forward                     0.2106  █████████████████████
+  period_adj                     0.0890  ████████
+  angle                          0.0859  ████████
+  shot_type_enc                  0.0811  ████████
+  speed_from_prev                0.0727  ███████
+  is_rebound                     0.0608  ██████
+  prev_distance                  0.0544  █████
+  prev_event_type_enc            0.0464  ████
+  is_rush                        0.0463  ████
+  rebound_angle_change           0.0395  ███
+
+Retraining on all non-test data...
+
+Applying Platt scaling calibration...
+  Platt scaling coefficients: a=1.2268, b=-2.1470
+
+Test set metrics:
+  AUC (raw):        0.7590
+  AUC (calibrated): 0.7590
+  LogLoss (raw):    0.5859
+  LogLoss (cal):    0.3020
+  Mean xG (raw):    0.4197
+  Mean xG (cal):    0.1123
+  Actual goal rate: 0.1094
+
+Calibration (raw):
+             shots    actual  predicted     error
+bucket                                           
+(0.0, 0.05]   2846  0.001757   0.022281  0.020524
+(0.05, 0.1]   2602  0.013067   0.076306  0.063239
+(0.1, 0.15]   3403  0.015281   0.126059  0.110779
+(0.15, 0.2]   3777  0.024358   0.175482  0.151124
+(0.2, 0.3]    7307  0.041878   0.248620  0.206742
+(0.3, 0.4]    6574  0.061758   0.350208  0.288450
+(0.4, 0.6]   14383  0.108879   0.503812  0.394933
+(0.6, 1.0]   16048  0.234671   0.696470  0.461799
+
+Calibration (Platt calibrated):
+             shots    actual  predicted     error
+bucket                                           
+(0.0, 0.05]  22730  0.028157   0.020238 -0.007919
+(0.05, 0.1]   9860  0.078499   0.073094 -0.005405
+(0.1, 0.15]   6927  0.122275   0.123922  0.001647
+(0.15, 0.2]   6048  0.170800   0.174488  0.003687
+(0.2, 0.3]    7616  0.215074   0.242633  0.027559
+(0.3, 0.4]    2668  0.301724   0.339356  0.037632
+(0.4, 0.6]     935  0.413904   0.461885  0.047981
+(0.6, 1.0]     156  0.660256   0.734250  0.073993
+
+Applying xG to full dataset...
+
+Building empty net xG model...
+  EN model — AUC: 0.7223 | LogLoss: 0.3673 (baseline: 0.4044)
+  EN goal rate: 0.140 | Mean pred: 0.135
+  EN xG mean: 0.128 | Actual goal rate: 0.129
+
+League calibration check (test season SOG):
+  Total xG:    6394.8
+  Total goals: 6227.0
+  xG/goal:     1.027
+
+Final dataset: 432,713 shots
+
+Saving models...
+Traceback (most recent call last):
+  File "/Users/brudnerbot/nhl-props/scripts/build_xg_model.py", line 361, in <module>
+    main()
+    ~~~~^^
+  File "/Users/brudnerbot/nhl-props/scripts/build_xg_model.py", line 345, in main
+    pickle.dump({"model": en_model, "scaler": en_scaler, "features": en_features})
+    ~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+TypeError: dump() missing required argument 'file' (pos 2)

@@ -4,15 +4,19 @@ import time
 import os
 
 # --- CONFIG ---
-SEASONS = ["20232024", "20242025", "20252026"]
+SEASONS = [
+    "20202021", "20212022", "20222023",
+    "20232024", "20242025", "20252026"
+]
 OUTPUT_DIR = os.path.expanduser("~/nhl-props/data/raw/team_game_logs")
 BASE_URL = "https://api-web.nhle.com/v1"
 
+# All franchises by season - VGK joined 2017, SEA joined 2021, ARI->UTA 2024
 TEAMS = [
-    "ANA", "BOS", "BUF", "CAR", "CBJ", "CGY", "CHI", "COL", "DAL", "DET",
-    "EDM", "FLA", "LAK", "MIN", "MTL", "NJD", "NSH", "NYI", "NYR", "OTT",
-    "PHI", "PIT", "SEA", "SJS", "STL", "TBL", "TOR", "UTA", "VAN", "VGK",
-    "WPG", "WSH"
+    "ANA", "ARI", "BOS", "BUF", "CAR", "CBJ", "CGY", "CHI", "COL", "DAL",
+    "DET", "EDM", "FLA", "LAK", "MIN", "MTL", "NJD", "NSH", "NYI", "NYR",
+    "OTT", "PHI", "PIT", "SEA", "SJS", "STL", "TBL", "TOR", "UTA", "VAN",
+    "VGK", "WPG", "WSH"
 ]
 
 # Penalty type codes that create PP time

@@ -1,0 +1,335 @@
+Loading team features...
+  7178 games loaded
+  Seasons: {20202021: 868, 20212022: 1312, 20222023: 1312, 20232024: 1312, 20242025: 1312, 20252026: 1062}
+
+Train: 6116 games | Test: 1062 games
+Total features available: 1178
+
+============================================================
+TRAINING MODELS
+============================================================
+
+--- home_goals_for (regression) ---
+  Selecting top features...
+  Training on 4892 games, validating on 1224...
+  MAE:  1.321  (baseline: 1.403)
+  RMSE: 1.663
+  Mean actual: 3.18  Mean predicted: 3.08
+  Sample prediction (first test game):
+  Projected: 4.26
+  Distribution: P(0)=1.4%  P(1)=6.0%  P(2)=12.8%  P(3)=18.2%  P(4)=19.4%  P(5)=16.5%  P(6)=11.7%  P(7)=7.1%  
+  Over 0.5: 98.6%  Over 1.5: 92.6%  Over 2.5: 79.8%  Over 3.5: 61.6%
+
+--- away_goals_for (regression) ---
+  Selecting top features...
+  Training on 4892 games, validating on 1224...
+  MAE:  1.281  (baseline: 1.320)
+  RMSE: 1.619
+  Mean actual: 3.06  Mean predicted: 3.04
+  Sample prediction (first test game):
+  Projected: 1.82
+  Distribution: P(0)=16.2%  P(1)=29.5%  P(2)=26.8%  P(3)=16.3%  P(4)=7.4%  P(5)=2.7%  P(6)=0.8%  P(7)=0.2%  
+  Over 0.5: 83.8%  Over 1.5: 54.2%  Over 2.5: 27.4%  Over 3.5: 11.2%
+
+--- home_ev_shots_on_goal_for_per60 (regression) ---
+  Selecting top features...
+  Training on 4892 games, validating on 1224...
+  MAE:  5.432  (baseline: 5.441)
+  RMSE: 6.732
+  Mean actual: 27.43  Mean predicted: 28.90
+  Sample prediction (first test game):
+  Projected: 31.10 (±6.53)
+  68% range: 24.57 to 37.63
+  90% range: 20.36 to 41.84
+  Over 20/60: 95.5%    Over 25/60: 82.5%    Over 30/60: 56.7%    Over 35/60: 27.5%    Over 40/60: 8.6%  
+
+--- away_ev_shots_on_goal_for_per60 (regression) ---
+  Selecting top features...
+  Training on 4892 games, validating on 1224...
+  MAE:  5.149  (baseline: 5.329)
+  RMSE: 6.408
+  Mean actual: 26.52  Mean predicted: 26.57
+  Sample prediction (first test game):
+  Projected: 23.96 (±6.46)
+  68% range: 17.50 to 30.42
+  90% range: 13.34 to 34.58
+  Over 20/60: 73.0%    Over 25/60: 43.6%    Over 30/60: 17.5%    Over 35/60: 4.4%    Over 40/60: 0.6%  
+
+--- home_pp_shots_on_goal_for_per60 (regression) ---
+  Selecting top features...
+  Training on 4892 games, validating on 1224...
+  MAE:  21.924  (baseline: 39.271)
+  RMSE: 114.596
+  Mean actual: 69.86  Mean predicted: 70.39
+  Sample prediction (first test game):
+  Projected: 68.70 (±41.35)
+  68% range: 27.35 to 110.06
+  90% range: 0.68 to 136.73
+  Over 20/60: 88.1%    Over 25/60: 85.5%    Over 30/60: 82.5%    Over 35/60: 79.2%    Over 40/60: 75.6%  
+
+--- away_pp_shots_on_goal_for_per60 (regression) ---
+  Selecting top features...
+  Training on 4892 games, validating on 1224...
+  MAE:  23.349  (baseline: 35.377)
+  RMSE: 55.572
+  Mean actual: 65.15  Mean predicted: 73.91
+  Sample prediction (first test game):
+  Projected: 39.28 (±71.81)
+  68% range: -32.53 to 111.09
+  90% range: -78.84 to 157.41
+  Over 20/60: 60.6%    Over 25/60: 57.9%    Over 30/60: 55.1%    Over 35/60: 52.4%    Over 40/60: 49.6%  
+
+--- home_sh_shots_on_goal_for_per60 (regression) ---
+  Selecting top features...
+  Training on 4892 games, validating on 1224...
+  MAE:  6.896  (baseline: 11.548)
+  RMSE: 11.844
+  Mean actual: 11.65  Mean predicted: 12.99
+  Sample prediction (first test game):
+  Projected: 11.83 (±15.18)
+  68% range: -3.35 to 27.01
+  90% range: -13.15 to 36.81
+  Over 20/60: 29.5%    Over 25/60: 19.3%    Over 30/60: 11.6%    Over 35/60: 6.4%    Over 40/60: 3.2%  
+
+--- away_sh_shots_on_goal_for_per60 (regression) ---
+  Selecting top features...
+  Training on 4892 games, validating on 1224...
+  MAE:  7.818  (baseline: 12.926)
+  RMSE: 59.814
+  Mean actual: 12.92  Mean predicted: 12.65
+  Sample prediction (first test game):
+  Projected: 1.47 (±18.40)
+  68% range: -16.93 to 19.86
+  90% range: -28.80 to 31.73
+  Over 20/60: 15.7%    Over 25/60: 10.0%    Over 30/60: 6.0%    Over 35/60: 3.4%    Over 40/60: 1.8%  
+
+--- home_ev_fenwick_for_per60 (regression) ---
+  Selecting top features...
+  Training on 4892 games, validating on 1224...
+  MAE:  7.985  (baseline: 8.099)
+  RMSE: 10.160
+  Mean actual: 42.20  Mean predicted: 41.42
+  Sample prediction (first test game):
+  Projected: 41.30 (±10.41)
+  68% range: 30.89 to 51.71
+  90% range: 24.18 to 58.43
+  Over 20/60: 98.0%    Over 25/60: 94.1%    Over 30/60: 86.1%    Over 35/60: 72.8%    Over 40/60: 55.0%  
+
+--- away_ev_fenwick_for_per60 (regression) ---
+  Selecting top features...
+  Training on 4892 games, validating on 1224...
+  MAE:  7.820  (baseline: 7.907)
+  RMSE: 9.696
+  Mean actual: 40.83  Mean predicted: 41.90
+  Sample prediction (first test game):
+  Projected: 41.79 (±10.25)
+  68% range: 31.55 to 52.04
+  90% range: 24.94 to 58.65
+  Over 20/60: 98.3%    Over 25/60: 94.9%    Over 30/60: 87.5%    Over 35/60: 74.6%    Over 40/60: 56.9%  
+
+--- home_pp_fenwick_for_per60 (regression) ---
+  Selecting top features...
+  Training on 4892 games, validating on 1224...
+  MAE:  31.062  (baseline: 79.904)
+  RMSE: 341.986
+  Mean actual: 115.76  Mean predicted: 104.95
+  Sample prediction (first test game):
+  Projected: 132.89 (±54.68)
+  68% range: 78.22 to 187.57
+  90% range: 42.95 to 222.84
+  Over 20/60: 98.1%    Over 25/60: 97.6%    Over 30/60: 97.0%    Over 35/60: 96.3%    Over 40/60: 95.5%  
+
+--- away_pp_fenwick_for_per60 (regression) ---
+  Selecting top features...
+  Training on 4892 games, validating on 1224...
+  MAE:  23.010  (baseline: 63.331)
+  RMSE: 83.492
+  Mean actual: 112.16  Mean predicted: 116.39
+  Sample prediction (first test game):
+  Projected: 42.43 (±101.00)
+  68% range: -58.57 to 143.43
+  90% range: -123.71 to 208.57
+  Over 20/60: 58.8%    Over 25/60: 56.9%    Over 30/60: 54.9%    Over 35/60: 52.9%    Over 40/60: 51.0%  
+
+--- home_ev_shot_attempts_for_per60 (regression) ---
+  Selecting top features...
+  Training on 4892 games, validating on 1224...
+  MAE:  7.323  (baseline: 7.656)
+  RMSE: 9.284
+  Mean actual: 58.21  Mean predicted: 58.04
+  Sample prediction (first test game):
+  Projected: 62.44 (±9.39)
+  68% range: 53.05 to 71.83
+  90% range: 46.99 to 77.89
+  Over 20/60: 100.0%    Over 25/60: 100.0%    Over 30/60: 100.0%    Over 35/60: 99.8%    Over 40/60: 99.2%  
+
+--- away_ev_shot_attempts_for_per60 (regression) ---
+  Selecting top features...
+  Training on 4892 games, validating on 1224...
+  MAE:  7.078  (baseline: 7.432)
+  RMSE: 8.767
+  Mean actual: 56.75  Mean predicted: 56.80
+  Sample prediction (first test game):
+  Projected: 54.52 (±9.23)
+  68% range: 45.29 to 63.74
+  90% range: 39.34 to 69.70
+  Over 20/60: 100.0%    Over 25/60: 99.9%    Over 30/60: 99.6%    Over 35/60: 98.3%    Over 40/60: 94.2%  
+
+--- home_xgf_total (regression) ---
+  Selecting top features...
+  Training on 4892 games, validating on 1224...
+  MAE:  0.986  (baseline: 1.051)
+  RMSE: 1.337
+  Mean actual: 4.53  Mean predicted: 4.37
+  Sample prediction (first test game):
+  Projected: 4.89 (±1.13)
+  68% range: 3.75 to 6.02
+  90% range: 3.02 to 6.75
+
+--- away_xgf_total (regression) ---
+  Selecting top features...
+  Training on 4892 games, validating on 1224...
+  MAE:  0.969  (baseline: 0.991)
+  RMSE: 1.269
+  Mean actual: 4.29  Mean predicted: 4.01
+  Sample prediction (first test game):
+  Projected: 4.15 (±1.08)
+  68% range: 3.07 to 5.23
+  90% range: 2.37 to 5.93
+
+--- home_xgf_sog_total (regression) ---
+  Selecting top features...
+  Training on 4892 games, validating on 1224...
+  MAE:  0.800  (baseline: 0.834)
+  RMSE: 1.060
+  Mean actual: 3.09  Mean predicted: 3.01
+  Sample prediction (first test game):
+  Projected: 3.28 (±0.92)
+  68% range: 2.36 to 4.20
+  90% range: 1.77 to 4.80
+
+--- away_xgf_sog_total (regression) ---
+  Selecting top features...
+  Training on 4892 games, validating on 1224...
+  MAE:  0.765  (baseline: 0.780)
+  RMSE: 0.997
+  Mean actual: 2.93  Mean predicted: 2.79
+  Sample prediction (first test game):
+  Projected: 2.79 (±0.86)
+  68% range: 1.92 to 3.65
+  90% range: 1.37 to 4.21
+
+--- home_ev_toi (regression) ---
+  Selecting top features...
+  Training on 4892 games, validating on 1224...
+  MAE:  2.325  (baseline: 3.677)
+  RMSE: 3.037
+  Mean actual: 49.58  Mean predicted: 49.46
+  Sample prediction (first test game):
+  Projected: 47.41 (±2.71)
+  68% range: 44.70 to 50.12
+  90% range: 42.95 to 51.87
+  Over 3min: 100.0%    Over 5min: 100.0%    Over 7min: 100.0%    Over 9min: 100.0%  
+
+--- away_ev_toi (regression) ---
+  Selecting top features...
+  Training on 4892 games, validating on 1224...
+  MAE:  2.325  (baseline: 3.677)
+  RMSE: 3.037
+  Mean actual: 49.58  Mean predicted: 49.46
+  Sample prediction (first test game):
+  Projected: 47.41 (±2.71)
+  68% range: 44.70 to 50.12
+  90% range: 42.95 to 51.87
+  Over 3min: 100.0%    Over 5min: 100.0%    Over 7min: 100.0%    Over 9min: 100.0%  
+
+--- home_pp_toi (regression) ---
+  Selecting top features...
+  Training on 4892 games, validating on 1224...
+  MAE:  0.795  (baseline: 2.164)
+  RMSE: 1.116
+  Mean actual: 5.40  Mean predicted: 5.43
+  Sample prediction (first test game):
+  Projected: 4.80 (±1.00)
+  68% range: 3.79 to 5.80
+  90% range: 3.14 to 6.45
+  Over 3min: 96.3%    Over 5min: 42.0%    Over 7min: 1.4%    Over 9min: 0.0%  
+
+--- away_pp_toi (regression) ---
+  Selecting top features...
+  Training on 4892 games, validating on 1224...
+  MAE:  0.717  (baseline: 2.092)
+  RMSE: 1.032
+  Mean actual: 4.92  Mean predicted: 4.89
+  Sample prediction (first test game):
+  Projected: 7.54 (±0.98)
+  68% range: 6.57 to 8.52
+  90% range: 5.94 to 9.14
+  Over 3min: 100.0%    Over 5min: 99.5%    Over 7min: 71.0%    Over 9min: 6.7%  
+
+--- home_won (classifier) ---
+  Selecting top features...
+  Training on 4892 games, validating on 1224...
+  AUC:    0.7530
+  LogLoss:0.5890  (baseline: 0.6920)
+  Brier:  0.2016
+  Sample prediction (first test game):
+  Probability: 90.0%
+
+============================================================
+SAVING MODELS
+============================================================
+  Saved: home_goals_for.json
+  Saved: away_goals_for.json
+  Saved: home_ev_shots_on_goal_for_per60.json
+  Saved: away_ev_shots_on_goal_for_per60.json
+  Saved: home_pp_shots_on_goal_for_per60.json
+  Saved: away_pp_shots_on_goal_for_per60.json
+  Saved: home_sh_shots_on_goal_for_per60.json
+  Saved: away_sh_shots_on_goal_for_per60.json
+  Saved: home_ev_fenwick_for_per60.json
+  Saved: away_ev_fenwick_for_per60.json
+  Saved: home_pp_fenwick_for_per60.json
+  Saved: away_pp_fenwick_for_per60.json
+  Saved: home_ev_shot_attempts_for_per60.json
+  Saved: away_ev_shot_attempts_for_per60.json
+  Saved: home_xgf_total.json
+  Saved: away_xgf_total.json
+  Saved: home_xgf_sog_total.json
+  Saved: away_xgf_sog_total.json
+  Saved: home_ev_toi.json
+  Saved: away_ev_toi.json
+  Saved: home_pp_toi.json
+  Saved: away_pp_toi.json
+  Saved: home_won.json
+  Saved: feature_lists.pkl
+  Saved: residual_stds.pkl
+
+============================================================
+SUMMARY
+============================================================
+  home_goals_for                                MAE: 1.321
+  away_goals_for                                MAE: 1.281
+  home_ev_shots_on_goal_for_per60               MAE: 5.432
+  away_ev_shots_on_goal_for_per60               MAE: 5.149
+  home_pp_shots_on_goal_for_per60               MAE: 21.924
+  away_pp_shots_on_goal_for_per60               MAE: 23.349
+  home_sh_shots_on_goal_for_per60               MAE: 6.896
+  away_sh_shots_on_goal_for_per60               MAE: 7.818
+  home_ev_fenwick_for_per60                     MAE: 7.985
+  away_ev_fenwick_for_per60                     MAE: 7.820
+  home_pp_fenwick_for_per60                     MAE: 31.062
+  away_pp_fenwick_for_per60                     MAE: 23.010
+  home_ev_shot_attempts_for_per60               MAE: 7.323
+  away_ev_shot_attempts_for_per60               MAE: 7.078
+  home_xgf_total                                MAE: 0.986
+  away_xgf_total                                MAE: 0.969
+  home_xgf_sog_total                            MAE: 0.800
+  away_xgf_sog_total                            MAE: 0.765
+  home_ev_toi                                   MAE: 2.325
+  away_ev_toi                                   MAE: 2.325
+  home_pp_toi                                   MAE: 0.795
+  away_pp_toi                                   MAE: 0.717
+  home_won                                      AUC: 0.7530
+
+Done!
