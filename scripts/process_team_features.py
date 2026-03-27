@@ -59,7 +59,6 @@ TEAM_STATS = [
     "ev_sog_fenwick_rate_for", "ev_shooting_pct",
     "ev_fenwick_rate_against", "ev_block_rate_for",
     "ev_sog_fenwick_rate_against", "ev_save_pct_team",
-    "ev_xg_per_sog_for", "ev_xg_per_sog_against",
     "pp_fenwick_rate_for", "pp_sog_fenwick_rate_for", "pp_shooting_pct",
     "pp_fenwick_rate_against", "pp_sog_fenwick_rate_against", "pp_save_pct_team",
     "sh_fenwick_rate_for", "sh_sog_fenwick_rate_for", "sh_shooting_pct",
@@ -311,6 +310,9 @@ def add_rolling_features(df):
             row = team_df.iloc[i].copy()
             past = team_df.iloc[:i]
 
+            current_season = row["season"]
+            season_past = past[past["season"] == current_season]
+
             for window in ROLLING_WINDOWS:
                 past_w = past.tail(window)
                 for stat in TEAM_STATS:
@@ -319,18 +321,57 @@ def add_rolling_features(df):
                             past_w[stat].mean() if len(past_w) > 0 else None
                         )
 
-                # Cumulative per-60 rates (correct: sum/sum, not avg of ratios)
+                # Correct rolling xG/SOG rates — sum(xG)/sum(shots) over window
                 if len(past_w) > 0:
-                    for strength, stats in CUMULATIVE_RATE_STATS.items():
-                        toi_col = f"{strength}_toi"
-                        toi_hours = past_w[toi_col].sum() / 60 if toi_col in past_w.columns else 0
-                        if toi_hours > 0:
-                            for stat in stats:
-                                raw_col = f"{strength}_{stat}"
-                                if raw_col in past_w.columns:
-                                    row[f"{strength}_{stat}_per60_last{window}"] = (
-                                        past_w[raw_col].sum() / toi_hours
-                                    )
+                    for strength in ["ev", "pp", "sh"]:
+                        xgf_col = f"xgf_sog_{strength}"
+                        xga_col = f"xga_sog_{strength}"
+                        sog_for_col = f"{strength}_shots_on_goal_for"
+                        sog_against_col = f"{strength}_shots_on_goal_against"
+                        if xgf_col in past_w.columns and sog_for_col in past_w.columns:
+                            sog_for = past_w[sog_for_col].sum()
+                            if sog_for > 0:
+                                row[f"{strength}_xg_per_sog_for_last{window}"] = (
+                                    past_w[xgf_col].sum() / sog_for
+                                )
+                        if xga_col in past_w.columns and sog_against_col in past_w.columns:
+                            sog_against = past_w[sog_against_col].sum()
+                            if sog_against > 0:
+                                row[f"{strength}_xg_per_sog_against_last{window}"] = (
+                                    past_w[xga_col].sum() / sog_against
+                                )
+
+                # Cumulative per-60 rates for current season
+            if len(season_past) > 0:
+                for strength, stats in CUMULATIVE_RATE_STATS.items():
+                    toi_col = f"{strength}_toi"
+                    toi_hours = season_past[toi_col].sum() / 60 if toi_col in season_past.columns else 0
+                    if toi_hours > 0:
+                        for stat in stats:
+                            raw_col = f"{strength}_{stat}"
+                            if raw_col in season_past.columns:
+                                row[f"{strength}_{stat}_per60_cumulative_season"] = (
+                                    season_past[raw_col].sum() / toi_hours
+                                )
+
+                # Cumulative xG/SOG rates — sum(xG) / sum(shots), correct not avg of ratios
+                for strength in ["ev", "pp", "sh"]:
+                    xgf_col = f"xgf_sog_{strength}"
+                    xga_col = f"xga_sog_{strength}"
+                    sog_for_col = f"{strength}_shots_on_goal_for"
+                    sog_against_col = f"{strength}_shots_on_goal_against"
+                    if all(c in season_past.columns for c in [xgf_col, sog_for_col]):
+                        sog_for = season_past[sog_for_col].sum()
+                        if sog_for > 0:
+                            row[f"{strength}_xg_per_sog_for_cumulative_season"] = (
+                                season_past[xgf_col].sum() / sog_for
+                            )
+                    if all(c in season_past.columns for c in [xga_col, sog_against_col]):
+                        sog_against = season_past[sog_against_col].sum()
+                        if sog_against > 0:
+                            row[f"{strength}_xg_per_sog_against_cumulative_season"] = (
+                                season_past[xga_col].sum() / sog_against
+                            )
 
                 if len(past_w) > 0:
                     opp_adjustments = []
@@ -353,8 +394,6 @@ def add_rolling_features(df):
                                     row[f"{stat}_last{window}"] - opp_df[opp_col].mean()
                                 )
 
-            current_season = row["season"]
-            season_past = past[past["season"] == current_season]
             for stat in TEAM_STATS:
                 if stat in team_df.columns:
                     row[f"{stat}_season_avg"] = (
@@ -401,8 +440,6 @@ def add_weighted_funnel_rates(df):
         "block_rate_against":        {0: 0.34, -1: 0.33, -2: 0.33},
         "fenwick_rate_for":          {0: 0.34, -1: 0.33, -2: 0.33},
         "fenwick_rate_against":      {0: 0.34, -1: 0.33, -2: 0.33},
-        "xg_per_sog_for":            {0: 0.34, -1: 0.33, -2: 0.33},
-        "xg_per_sog_against":        {0: 0.34, -1: 0.33, -2: 0.33},
         "save_pct_team":             {0: 0.34, -1: 0.33, -2: 0.33},
     }
 
