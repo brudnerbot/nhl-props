@@ -151,24 +151,27 @@ def parse_lineup(html: str, team: str) -> dict:
     # --- Structure forward lines (row order: LW,C,RW per line) ---
     fwd = section_players["forwards"]
     forward_lines = []
-    for i in range(0, min(len(fwd), 12), 3):
+    for i in range(0, min(len(fwd), 15), 3):
         group = fwd[i:i+3]
-        if len(group) == 3:
-            forward_lines.append({
-                "line": len(forward_lines) + 1,
-                "lw": group[0], "c": group[1], "rw": group[2],
-            })
+        if not group:
+            break
+        line = {"line": len(forward_lines) + 1}
+        line["lw"] = group[0] if len(group) > 0 else None
+        line["c"]  = group[1] if len(group) > 1 else None
+        line["rw"] = group[2] if len(group) > 2 else None
+        forward_lines.append(line)
 
     # --- Defensive pairings ---
     dfn = section_players["defense"]
     defense_pairs = []
-    for i in range(0, min(len(dfn), 6), 2):
+    for i in range(0, min(len(dfn), 8), 2):
         group = dfn[i:i+2]
-        if len(group) == 2:
-            defense_pairs.append({
-                "pair": len(defense_pairs) + 1,
-                "ld": group[0], "rd": group[1],
-            })
+        if not group:
+            break
+        pair = {"pair": len(defense_pairs) + 1}
+        pair["ld"] = group[0] if len(group) > 0 else None
+        pair["rd"] = group[1] if len(group) > 1 else None
+        defense_pairs.append(pair)
 
     # --- Split powerplay: PP1(5) PP2(5) PK1(4) PK2(4) ---
     pp = section_players["powerplay"]
@@ -254,12 +257,16 @@ def print_summary(data: dict, team: str = "EDM"):
 
     print("\nFORWARD LINES:")
     for line in t["forward_lines"]:
-        lw = line["lw"]["name"]; c = line["c"]["name"]; rw = line["rw"]["name"]
-        print(f"  Line {line['line']}: {lw} — {c} — {rw}")
+        lw = line["lw"]["name"] if line["lw"] else "—"
+        c  = line["c"]["name"]  if line["c"]  else "—"
+        rw = line["rw"]["name"] if line["rw"] else "—"
+        print(f"  L{line['line']}: {lw:<22} {c:<22} {rw}")
 
-    print("\nDEFENSIVE PAIRINGS:")
+    print("\nDEFENSE PAIRS:")
     for pair in t["defense_pairs"]:
-        print(f"  Pair {pair['pair']}: {pair['ld']['name']} — {pair['rd']['name']}")
+        ld = pair["ld"]["name"] if pair["ld"] else "—"
+        rd = pair["rd"]["name"] if pair["rd"] else "—"
+        print(f"  P{pair['pair']}: {ld:<22} {rd}")
 
     print("\nPOWER PLAY:")
     pp1 = [p["name"] for p in t["pp1"]]
