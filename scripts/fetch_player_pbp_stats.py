@@ -5,10 +5,9 @@ Fetches player-level stats from NHL API play-by-play and shifts data.
 Computes per-game per-player:
   - EV/PP/SH TOI (from shifts + situation codes)
   - Individual shots, goals, assists by strength (from PBP events)
-  - Individual xG (from shot events, requires xG model applied separately)
+  - Missed shots and shots blocked by opponent (individual Corsi components)
   - On-ice shots for/against by strength
   - On-ice goals for/against by strength
-  - On-ice xG for/against by strength (placeholder — joined later)
   - Hits, blocks, faceoffs won/taken, giveaways, takeaways
 
 Situation code format: away_goalie|away_skaters|home_skaters|home_goalie
@@ -176,9 +175,9 @@ def process_game(game_id: int, season: int, date: str,
     if not pbp or not shifts:
         return []
 
-    home_id       = pbp["homeTeam"]["id"]
-    time_sit      = build_situation_map(pbp)
-    shift_ivs     = build_shift_intervals(shifts)
+    home_id   = pbp["homeTeam"]["id"]
+    time_sit  = build_situation_map(pbp)
+    shift_ivs = build_shift_intervals(shifts)
 
     # --- Roster ---
     roster = {}
@@ -226,18 +225,22 @@ def process_game(game_id: int, season: int, date: str,
 
     # --- Individual + on-ice stats ---
     player_stats = defaultdict(lambda: {
-        # Individual by strength
+        # Individual shots by strength
         "ev_shots": 0, "pp_shots": 0, "sh_shots": 0,
+        # Individual Corsi components by strength
+        "ev_missed_shots": 0, "pp_missed_shots": 0, "sh_missed_shots": 0,
+        "ev_shots_blocked_by_opp": 0, "pp_shots_blocked_by_opp": 0, "sh_shots_blocked_by_opp": 0,
+        # Goals and assists by strength
         "ev_goals": 0, "pp_goals": 0, "sh_goals": 0,
         "ev_assists": 0, "pp_assists": 0, "sh_assists": 0,
-        "ev_ixg": 0.0, "pp_ixg": 0.0, "sh_ixg": 0.0,
-        # On-ice by strength
-        "ev_onice_gf": 0, "ev_onice_ga": 0,
-        "pp_onice_gf": 0, "pp_onice_ga": 0,
-        "sh_onice_gf": 0, "sh_onice_ga": 0,
+        # On-ice shots for/against by strength
         "ev_onice_sf": 0, "ev_onice_sa": 0,
         "pp_onice_sf": 0, "pp_onice_sa": 0,
         "sh_onice_sf": 0, "sh_onice_sa": 0,
+        # On-ice goals for/against by strength
+        "ev_onice_gf": 0, "ev_onice_ga": 0,
+        "pp_onice_gf": 0, "pp_onice_ga": 0,
+        "sh_onice_gf": 0, "sh_onice_ga": 0,
         # Misc
         "hits": 0, "blocks": 0,
         "faceoffs_won": 0, "faceoffs_taken": 0,
@@ -249,8 +252,8 @@ def process_game(game_id: int, season: int, date: str,
         sit    = play.get("situationCode", "")
         period = play["periodDescriptor"]["number"]
         if period > 4: continue
-        det    = play.get("details", {})
-        t_sec  = time_to_seconds(period, play.get("timeInPeriod", "0:00"))
+        det   = play.get("details", {})
+        t_sec = time_to_seconds(period, play.get("timeInPeriod", "0:00"))
 
         decoded = decode_situation(sit)
         if not decoded: continue
@@ -263,11 +266,8 @@ def process_game(game_id: int, season: int, date: str,
             if ih: return "pp" if hs > as_ else "sh"
             else:  return "pp" if as_ > hs else "sh"
 
-        # --- Shot events (SOG + goals) ---
         if etype in ("shot-on-goal", "goal"):
             shooter = det.get("shootingPlayerId") or det.get("scoringPlayerId")
-
-            # Individual stats
             if shooter and shooter in roster:
                 s = get_strength(shooter)
                 if s != "en":
@@ -277,7 +277,6 @@ def process_game(game_id: int, season: int, date: str,
             on_ice = players_on_ice_at(t_sec, shift_ivs)
             shooting_team_id = det.get("eventOwnerTeamId")
             shooting_is_home = (shooting_team_id == home_id)
-
             for pid in on_ice:
                 if pid not in roster: continue
                 pid_is_home = roster[pid]["is_home"]
@@ -288,7 +287,6 @@ def process_game(game_id: int, season: int, date: str,
                 else:
                     player_stats[pid][f"{s}_onice_sa"] += 1
 
-            # Goals
             if etype == "goal":
                 scorer = det.get("scoringPlayerId")
                 if scorer and scorer in roster:
@@ -314,15 +312,27 @@ def process_game(game_id: int, season: int, date: str,
                     else:
                         player_stats[pid][f"{s}_onice_ga"] += 1
 
+        elif etype == "missed-shot":
+            shooter = det.get("shootingPlayerId")
+            if shooter and shooter in roster:
+                s = get_strength(shooter)
+                if s != "en":
+                    player_stats[shooter][f"{s}_missed_shots"] += 1
+
+        elif etype == "blocked-shot":
+            shooter = det.get("shootingPlayerId")
+            if shooter and shooter in roster:
+                s = get_strength(shooter)
+                if s != "en":
+                    player_stats[shooter][f"{s}_shots_blocked_by_opp"] += 1
+            blocker = det.get("blockingPlayerId")
+            if blocker and blocker in roster:
+                player_stats[blocker]["blocks"] += 1
+
         elif etype == "hit":
             hitter = det.get("hittingPlayerId")
             if hitter and hitter in roster:
                 player_stats[hitter]["hits"] += 1
-
-        elif etype == "blocked-shot":
-            blocker = det.get("blockingPlayerId")
-            if blocker and blocker in roster:
-                player_stats[blocker]["blocks"] += 1
 
         elif etype == "faceoff":
             w = det.get("winningPlayerId")
@@ -343,7 +353,7 @@ def process_game(game_id: int, season: int, date: str,
             if pid and pid in roster:
                 player_stats[pid]["takeaways"] += 1
 
-    # Override hits/blocks with boxscore
+    # Override hits/blocks with boxscore (more reliable)
     if box:
         for side in ["homeTeam", "awayTeam"]:
             for pos in ["forwards", "defense"]:
@@ -360,52 +370,64 @@ def process_game(game_id: int, season: int, date: str,
         toi = player_toi[pid]
         st  = player_stats[pid]
         rows.append({
-            "game_id":         game_id,
-            "season":          season,
-            "date":            date,
-            "player_id":       pid,
-            "name":            r["name"],
-            "position":        r["position"],
-            "team":            r["team"],
-            "opponent":        away_team if r["is_home"] else home_team,
-            "is_home":         r["is_home"],
+            "game_id":              game_id,
+            "season":               season,
+            "date":                 date,
+            "player_id":            pid,
+            "name":                 r["name"],
+            "position":             r["position"],
+            "team":                 r["team"],
+            "opponent":             away_team if r["is_home"] else home_team,
+            "is_home":              r["is_home"],
             # TOI
-            "toi_total":       round(toi["total"], 3),
-            "toi_ev":          round(toi["ev"],    3),
-            "toi_pp":          round(toi["pp"],    3),
-            "toi_sh":          round(toi["sh"],    3),
-            "toi_en":          round(toi["en"],    3),
-            # Individual
-            "ev_shots":        st["ev_shots"],
-            "pp_shots":        st["pp_shots"],
-            "sh_shots":        st["sh_shots"],
-            "ev_goals":        st["ev_goals"],
-            "pp_goals":        st["pp_goals"],
-            "sh_goals":        st["sh_goals"],
-            "ev_assists":      st["ev_assists"],
-            "pp_assists":      st["pp_assists"],
-            "sh_assists":      st["sh_assists"],
+            "toi_total":            round(toi["total"], 3),
+            "toi_ev":               round(toi["ev"],    3),
+            "toi_pp":               round(toi["pp"],    3),
+            "toi_sh":               round(toi["sh"],    3),
+            "toi_en":               round(toi["en"],    3),
+            # Individual shots by strength
+            "ev_shots":             st["ev_shots"],
+            "pp_shots":             st["pp_shots"],
+            "sh_shots":             st["sh_shots"],
+            # Individual Corsi components by strength
+            "ev_missed_shots":          st["ev_missed_shots"],
+            "pp_missed_shots":          st["pp_missed_shots"],
+            "sh_missed_shots":          st["sh_missed_shots"],
+            "ev_shots_blocked_by_opp":  st["ev_shots_blocked_by_opp"],
+            "pp_shots_blocked_by_opp":  st["pp_shots_blocked_by_opp"],
+            "sh_shots_blocked_by_opp":  st["sh_shots_blocked_by_opp"],
+            # Total shot attempts by strength (Corsi)
+            "ev_shot_attempts": st["ev_shots"] + st["ev_missed_shots"] + st["ev_shots_blocked_by_opp"],
+            "pp_shot_attempts": st["pp_shots"] + st["pp_missed_shots"] + st["pp_shots_blocked_by_opp"],
+            "sh_shot_attempts": st["sh_shots"] + st["sh_missed_shots"] + st["sh_shots_blocked_by_opp"],
+            # Goals and assists by strength
+            "ev_goals":             st["ev_goals"],
+            "pp_goals":             st["pp_goals"],
+            "sh_goals":             st["sh_goals"],
+            "ev_assists":           st["ev_assists"],
+            "pp_assists":           st["pp_assists"],
+            "sh_assists":           st["sh_assists"],
             # On-ice shots
-            "ev_onice_sf":     st["ev_onice_sf"],
-            "ev_onice_sa":     st["ev_onice_sa"],
-            "pp_onice_sf":     st["pp_onice_sf"],
-            "pp_onice_sa":     st["pp_onice_sa"],
-            "sh_onice_sf":     st["sh_onice_sf"],
-            "sh_onice_sa":     st["sh_onice_sa"],
+            "ev_onice_sf":          st["ev_onice_sf"],
+            "ev_onice_sa":          st["ev_onice_sa"],
+            "pp_onice_sf":          st["pp_onice_sf"],
+            "pp_onice_sa":          st["pp_onice_sa"],
+            "sh_onice_sf":          st["sh_onice_sf"],
+            "sh_onice_sa":          st["sh_onice_sa"],
             # On-ice goals
-            "ev_onice_gf":     st["ev_onice_gf"],
-            "ev_onice_ga":     st["ev_onice_ga"],
-            "pp_onice_gf":     st["pp_onice_gf"],
-            "pp_onice_ga":     st["pp_onice_ga"],
-            "sh_onice_gf":     st["sh_onice_gf"],
-            "sh_onice_ga":     st["sh_onice_ga"],
+            "ev_onice_gf":          st["ev_onice_gf"],
+            "ev_onice_ga":          st["ev_onice_ga"],
+            "pp_onice_gf":          st["pp_onice_gf"],
+            "pp_onice_ga":          st["pp_onice_ga"],
+            "sh_onice_gf":          st["sh_onice_gf"],
+            "sh_onice_ga":          st["sh_onice_ga"],
             # Misc
-            "hits":            st["hits"],
-            "blocks":          st["blocks"],
-            "faceoffs_won":    st["faceoffs_won"],
-            "faceoffs_taken":  st["faceoffs_taken"],
-            "giveaways":       st["giveaways"],
-            "takeaways":       st["takeaways"],
+            "hits":                 st["hits"],
+            "blocks":               st["blocks"],
+            "faceoffs_won":         st["faceoffs_won"],
+            "faceoffs_taken":       st["faceoffs_taken"],
+            "giveaways":            st["giveaways"],
+            "takeaways":            st["takeaways"],
         })
     return rows
 
