@@ -388,14 +388,14 @@ def compute_goals(preds, feature_row):
     """
     ev_shots    = max(preds.get("ev_shots", 0), 0)
     pp_shots    = max(preds.get("pp_shots", 0), 0)
-    sh_shots    = ev_shots * 0.03  # approximate SH shots
+    toi_sh       = float(feature_row.get("toi_sh_last20", 0) or 0)
+    sh_per60     = float(feature_row.get("regressed_sh_shots_per60", 5.44) or 5.44)
+    sh_shots     = toi_sh / 60 * sh_per60
 
     ev_sh_pct   = float(feature_row.get("regressed_ev_shooting_pct", 0.098) or 0.098)
     finishing   = float(feature_row.get("regressed_finishing_talent", 1.097) or 1.097)
 
-    # Career PP shooting% — compute from career stats if available
-    career_pp_goals  = float(feature_row.get("career_ev_goals_sum", 0) or 0)  # approximation
-    pp_sh_pct        = 0.128  # league average PP shooting%
+    pp_sh_pct = float(feature_row.get("regressed_pp_shooting_pct", 0.128) or 0.128)
 
     ev_goals_lambda = ev_shots * ev_sh_pct * finishing
     pp_goals_lambda = pp_shots * pp_sh_pct

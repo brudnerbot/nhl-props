@@ -28,6 +28,7 @@ warnings.filterwarnings("ignore")
 ROOT     = Path(__file__).resolve().parents[1]
 DATA_DIR = ROOT / "data"
 
+PLAYER_PP  = DATA_DIR / "raw/player_pp_stats.csv"
 PLAYER_GL   = DATA_DIR / "raw/game_logs/player_game_logs.csv"
 PLAYER_PBP  = DATA_DIR / "raw/player_pbp_stats/player_pbp_stats.csv"
 SHOT_XG     = DATA_DIR / "processed/shot_data_with_xg.csv"
@@ -85,6 +86,15 @@ def load_base(gl_path, pbp_path):
     df = gl.merge(pbp[pbp_cols], on=["game_id","player_id"], how="left")
     print(f"  After merge: {len(df):,} rows")
     print(f"  Rows with PBP data: {df['toi_ev'].notna().sum():,}")
+
+    # Fix merge column collisions BEFORE anything else
+    # pp_goals_x = from game_logs (all seasons), pp_goals_y = from PBP (2 seasons)
+    # Use game_logs as authoritative source for pp_goals and sh_goals
+    for base in ["pp_goals", "sh_goals"]:
+        x_col, y_col = f"{base}_x", f"{base}_y"
+        if x_col in df.columns:
+            df[base] = df[x_col].fillna(0)
+            df = df.drop(columns=[x_col, y_col], errors="ignore")
 
     mask = df["toi_ev"].isna()
     gl_pp_goals  = df["pp_goals"].fillna(0)  if "pp_goals"  in df.columns else pd.Series(0, index=df.index)
@@ -168,6 +178,37 @@ def add_team_context(df, team_gl_path):
     print(f"  Team context added: {df['team_ev_toi'].notna().sum():,} rows")
     return df
 
+def add_pp_career_stats(df, pp_path):
+    print("Adding career PP stats...")
+    pp = pd.read_csv(pp_path, low_memory=False)
+    pp = pp[["player_id","season","pp_goals","pp_shots","pp_toi_sec"]].copy()
+    pp.columns = ["player_id","season","pp_goals_api","pp_shots_api","pp_toi_sec_api"]
+
+    # Deduplicate — keep one row per player per season
+    pp = pp.groupby(["player_id","season"]).agg({
+        "pp_goals_api": "sum",
+        "pp_shots_api": "sum",
+        "pp_toi_sec_api": "sum"
+    }).reset_index()
+
+    # Join per player per season
+    df = df.merge(pp, on=["player_id","season"], how="left")
+
+    # Distribute season totals evenly across games
+    games_per_season = df.groupby(["player_id","season"])["game_id"].transform("count")
+    df["pp_shots_api_per_game"] = df["pp_shots_api"] / games_per_season.clip(lower=1)
+
+    # Fill: pre-PBP seasons use API per-game, PBP seasons use actual PBP pp_shots
+    pre_pbp = df["season"] < 20242025
+    df["pp_shots_api_filled"] = np.where(
+        pre_pbp,
+        df["pp_shots_api_per_game"].fillna(0),  # fillna(0) for players with no API data
+        df["pp_shots"].fillna(0)
+    )
+
+    print(f"  PP API data joined: {df['pp_shots_api'].notna().sum():,} rows")
+    df = df.drop(columns=["pp_shots_api_per_game"], errors="ignore")
+    return df
 
 def add_game_rates(df):
     print("Computing per-game rates...")
@@ -298,6 +339,41 @@ def add_rolling_features(df):
         (1 - w_career) * LEAGUE_SH_PCT
     ).fillna(LEAGUE_SH_PCT)
 
+    # Career PP shooting% using accurate API PP shots
+    LEAGUE_PP_SH_PCT = 0.144
+    PP_REGRESSION_N  = 30
+
+    pp_shots_col = "pp_shots_api_filled" if "pp_shots_api_filled" in df.columns else "pp_shots"
+
+    career_pp_shots = df.groupby("player_id")[pp_shots_col].transform(
+        lambda x: x.shift(1).expanding().sum()
+    )
+    career_pp_goals = df.groupby("player_id")["pp_goals"].transform(
+        lambda x: x.shift(1).expanding().sum()
+    )
+    df["career_pp_shooting_pct"] = career_pp_goals / (career_pp_shots + 1e-6)
+    w_pp = career_pp_shots / (career_pp_shots + PP_REGRESSION_N)
+    df["regressed_pp_shooting_pct"] = (
+        w_pp * df["career_pp_shooting_pct"] +
+        (1 - w_pp) * LEAGUE_PP_SH_PCT
+    ).fillna(LEAGUE_PP_SH_PCT)
+
+    # Career SH shots per 60 SH TOI
+    LEAGUE_SH_SHOTS_PER60 = 5.44
+    SH_REGRESSION_N       = 20   # minutes of SH TOI to regress toward mean
+    career_sh_shots = df.groupby("player_id")["sh_shots"].transform(
+        lambda x: x.shift(1).expanding().sum()
+    )
+    career_sh_toi = df.groupby("player_id")["toi_sh"].transform(
+        lambda x: x.shift(1).expanding().sum()
+    )
+    df["career_sh_shots_per60"] = career_sh_shots / (career_sh_toi / 60 + 1e-6)
+    w_sh = career_sh_toi / (career_sh_toi + SH_REGRESSION_N)
+    df["regressed_sh_shots_per60"] = (
+        w_sh * df["career_sh_shots_per60"] +
+        (1 - w_sh) * LEAGUE_SH_SHOTS_PER60
+    ).fillna(LEAGUE_SH_SHOTS_PER60)
+
     # Finishing talent (xG era only)
     LEAGUE_FINISHING = 1.097
     career_ev_ixg_xg = df.groupby("player_id").apply(
@@ -362,6 +438,7 @@ def main():
     df = load_base(PLAYER_GL, PLAYER_PBP)
     df = add_individual_xg(df, SHOT_XG)
     df = add_team_context(df, TEAM_GL)
+    df = add_pp_career_stats(df, PLAYER_PP)
     df = add_game_rates(df)
 
     print(f"\nBase dataset: {len(df):,} rows, {df.shape[1]} columns")
