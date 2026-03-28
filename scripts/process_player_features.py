@@ -35,7 +35,7 @@ SHOT_XG     = DATA_DIR / "processed/shot_data_with_xg.csv"
 TEAM_GL     = DATA_DIR / "raw/team_game_logs/team_game_logs.csv"
 OUT_FILE    = DATA_DIR / "processed/player_features.csv"
 
-ROLLING_WINDOWS = [10, 20, 30]
+ROLLING_WINDOWS = [5, 10, 20, 30]
 MIN_SEASON      = 20152016
 
 ROLL_STATS = [
@@ -56,6 +56,7 @@ ROLL_STATS = [
     # Misc
     "ipp", "ev_toi_share", "pp_toi_share",
     "hits", "blocks", "faceoffs_won", "faceoffs_taken",
+    "ev_goals_per_ixg",
 ]
 
 
@@ -205,6 +206,11 @@ def add_game_rates(df):
     df["ipp"]     = df["ipp"].clip(0, 1)
     df["ev_cf_pct"] = df["ev_onice_sf"] / (df["ev_onice_sf"] + df["ev_onice_sa"] + eps)
 
+    # Goals vs xG ratio (finishing talent)
+    # Only meaningful when xG data is available (20222023+)
+    df["ev_goals_per_ixg"] = df["ev_goals"] / (df["ev_ixg"] + eps)
+    df["ev_goals_per_ixg"] = df["ev_goals_per_ixg"].clip(0, 10)  # cap outliers
+
     # Cap extreme rates from short-TOI games
     for col in ["ev_shots_per60","pp_shots_per60","ev_ixg_per60","pp_ixg_per60",
                 "ev_onice_sf_per60","ev_onice_sa_per60"]:
@@ -215,6 +221,43 @@ def add_game_rates(df):
 
     return df
 
+def add_trend_features(df):
+    """
+    Add recency trend features to detect role changes.
+    - Ratio: last5 / last20 (>1.3 = trending up, <0.7 = trending down)
+    - Delta: last5 - last20 (absolute change)
+    - EWM: exponentially weighted mean (span=10, within season)
+    """
+    print("Computing trend and EWM features...")
+    df = df.sort_values(["player_id","season","date"]).reset_index(drop=True)
+
+    TREND_STATS = ["toi_ev", "toi_pp", "ev_shots", "pp_shots", "ixg"]
+
+    for stat in TREND_STATS:
+        if stat not in df.columns:
+            continue
+
+        grp = df.groupby(["player_id","season"])[stat]
+
+        # EWM within season (span=10 gives ~last 10 games with decay)
+        df[f"{stat}_ewm10"] = grp.transform(
+            lambda x: x.shift(1).ewm(span=10, min_periods=1).mean()
+        )
+
+        # Ratio: last5 / last20 (recency vs medium-term)
+        # Requires last5 and last20 already computed
+        l5_col  = f"{stat}_last5"
+        l20_col = f"{stat}_last20"
+        if l5_col in df.columns and l20_col in df.columns:
+            df[f"{stat}_trend_ratio"] = (
+                df[l5_col] / (df[l20_col] + 1e-6)
+            ).clip(0, 5)
+
+            # Delta: last5 - last20
+            df[f"{stat}_trend_delta"] = df[l5_col] - df[l20_col]
+
+    print(f"  Trend features added")
+    return df
 
 # ── Step 5: Rolling features (vectorized, season-aware) ──────────────────────
 def add_rolling_features(df):
@@ -267,6 +310,31 @@ def add_rolling_features(df):
 
     df["career_shooting_pct"]    = career_goals    / (career_shots    + 1e-6)
     df["career_ev_shooting_pct"] = career_ev_goals / (career_ev_shots + 1e-6)
+
+    # Career finishing talent: actual EV goals / expected EV goals
+    # IMPORTANT: only use games where xG data exists (20222023+)
+    # to avoid dividing full career goals by partial xG
+    xg_mask = df["ev_ixg"] > 0  # proxy for having xG data
+
+    career_ev_ixg_xg = df.groupby("player_id").apply(
+        lambda x: x["ev_ixg"].where(x["ev_ixg"] > 0).shift(1).expanding().sum()
+    ).reset_index(level=0, drop=True)
+
+    career_ev_goals_xg = df.groupby("player_id").apply(
+        lambda x: x["ev_goals"].where(x["ev_ixg"] > 0).shift(1).expanding().sum()
+    ).reset_index(level=0, drop=True)
+
+    df["career_ev_ixg_xg"]    = career_ev_ixg_xg.fillna(0)
+    df["career_ev_goals_xg"]  = career_ev_goals_xg.fillna(0)
+    df["career_finishing_talent"] = (
+        df["career_ev_goals_xg"] / (df["career_ev_ixg_xg"] + 1e-6)
+    )
+    LEAGUE_FINISHING = 1.097  # actual goals/xG ratio from xG era data
+    w_finish = df["career_ev_ixg_xg"] / (df["career_ev_ixg_xg"] + 20)
+    df["regressed_finishing_talent"] = (
+        w_finish * df["career_finishing_talent"] + (1 - w_finish) * LEAGUE_FINISHING
+    ).fillna(LEAGUE_FINISHING)
+    df = df.drop(columns=["career_ev_ixg_xg","career_ev_goals_xg"])
 
     # Regressed EV shooting% (Bayesian: 100-shot prior toward league mean)
     LEAGUE_SH_PCT = 0.098
@@ -330,6 +398,7 @@ def main():
     print(f"Players: {df['player_id'].nunique():,}")
 
     df = add_rolling_features(df)
+    df = add_trend_features(df)
     df = add_cumulative_rates(df)
 
     df = df.sort_values(["date","player_id"]).reset_index(drop=True)
