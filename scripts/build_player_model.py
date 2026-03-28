@@ -64,6 +64,7 @@ EXCLUDE = {
     "ev_toi_share","pp_toi_share","ev_cf_pct","ipp",
     "hits","blocks","faceoffs_won","faceoffs_taken","giveaways","takeaways",
     "team_ev_toi","team_pp_toi","team_sh_toi","team_ev_sog","team_pp_sog",
+    "pp_shots_api", "pp_goals_api", "pp_toi_sec_api",
 }
 
 TARGETS = [
