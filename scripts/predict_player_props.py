@@ -5,28 +5,31 @@ Generates player prop predictions for a given game using:
   - Today's lineup from data/raw/lineups/lineups_YYYYMMDD.json
   - Player features from data/processed/player_features.csv
   - Trained models from models/player/
+  - Team PP baselines computed on-the-fly from recent PBP data
+
+PP TOI uses formula: team_pp_toi × player_pp_share
+  PP share priority:
+  1. Lineup PP unit assignment (primary) → team PP1/PP2 baseline
+  2. Recent games (last 10 with PP time) → nudge from baseline
+  3. Season history → small additional nudge
 
 Usage:
     python scripts/predict_player_props.py TOR VAN
     python scripts/predict_player_props.py TOR VAN --date 2026-03-28
-
-Output:
-    - Per-player projections: TOI, shots, goals, assists, points
-    - Team aggregates: total shots, goals
-    - Prop lines with over/under probabilities
 """
 
 import argparse
+import json
 import pickle
 import re
+import unicodedata
 import warnings
 from pathlib import Path
-from datetime import datetime, date
 
 import numpy as np
 import pandas as pd
 import xgboost as xgb
-from scipy.stats import poisson, norm
+from scipy.stats import poisson
 
 warnings.filterwarnings("ignore")
 
@@ -36,43 +39,215 @@ MODEL_DIR = ROOT / "models/player"
 
 PLAYER_FEATURES = DATA_DIR / "processed/player_features.csv"
 LINEUP_DIR      = DATA_DIR / "raw/lineups"
+PP_SHARES_FILE  = DATA_DIR / "raw/player_pp_shares.csv"
+PBP_FILE        = DATA_DIR / "raw/player_pbp_stats/player_pbp_stats.csv"
+TEAM_LOGS_FILE  = DATA_DIR / "raw/team_game_logs/team_game_logs.csv"
 
-# Book lines for common props
-SHOT_LINES   = [0.5, 1.5, 2.5, 3.5, 4.5, 5.5, 6.5]
-POINT_LINES  = [0.5, 1.5, 2.5]
-GOAL_LINES   = [0.5]
-ASSIST_LINES = [0.5, 1.5]
+SHOT_LINES  = [0.5, 1.5, 2.5, 3.5, 4.5, 5.5, 6.5]
+POINT_LINES = [0.5, 1.5, 2.5]
+
+# League average fallback PP share by unit
+PP_SHARE_FALLBACK = {
+    1: 0.670,
+    2: 0.330,
+    0: 0.030,
+}
+
+NICKNAMES = {
+    "matt": "matthew", "mike": "michael", "alex": "alexander",
+    "nick": "nicholas", "mitch": "mitchell", "cal": "callan",
+    "zach": "zachary", "jake": "jacob", "pat": "patrick",
+    "phil": "philip", "will": "william", "bill": "william",
+    "rick": "richard", "dan": "daniel", "jon": "jonathan",
+    "tom": "thomas", "rob": "robert", "cam": "cameron",
+    "nate": "nathan", "drew": "andrew", "steve": "steven",
+    "chris": "christopher", "tony": "anthony", "brad": "bradley",
+    "sam": "samuel", "mat": "matthew",
+}
+NICKNAMES_REVERSE = {v: k for k, v in NICKNAMES.items()}
 
 
 # ── Model loading ─────────────────────────────────────────────────────────────
 def load_models():
-    models      = {}
-    model_types = {}
-    calibrators = {}
-
     with open(MODEL_DIR / "feature_lists.pkl", "rb") as f:
         feature_lists = pickle.load(f)
     with open(MODEL_DIR / "model_types.pkl", "rb") as f:
         model_types = pickle.load(f)
     with open(MODEL_DIR / "residual_stds.pkl", "rb") as f:
         residual_stds = pickle.load(f)
-
+    calibrators = {}
     if (MODEL_DIR / "calibrators.pkl").exists():
         with open(MODEL_DIR / "calibrators.pkl", "rb") as f:
             calibrators = pickle.load(f)
 
-    for target, mtype in model_types.items():
-        path = MODEL_DIR / f"{target}.json"
+    models = {}
+    for name, mtype in model_types.items():
+        path = MODEL_DIR / f"{name}.json"
         if not path.exists():
             continue
-        if mtype == "classifier":
-            m = xgb.XGBClassifier()
-        else:
-            m = xgb.XGBRegressor()
+        m = xgb.XGBClassifier() if mtype == "classifier" else xgb.XGBRegressor()
         m.load_model(str(path))
-        models[target] = m
+        models[name] = m
 
+    print(f"  Loaded {len(models)} models: {list(models.keys())}")
     return models, feature_lists, model_types, calibrators, residual_stds
+
+
+# ── PP data loading and computation ──────────────────────────────────────────
+def load_pp_shares():
+    """Season-level PP share per player per team per season."""
+    pp = pd.read_csv(PP_SHARES_FILE, low_memory=False)
+    lookup = {}
+    for _, row in pp.iterrows():
+        key = (int(row["player_id"]), str(row["team"]), int(row["season"]))
+        lookup[key] = {
+            "avg_share":     float(row["avg_share"]),
+            "games_with_pp": float(row["games_with_pp"]),
+            "pp_unit_est":   int(row["pp_unit_est"]),
+        }
+    return lookup
+
+
+def compute_team_pp_baselines(pbp_path, team_logs_path, last_n_games=20):
+    """
+    Compute each team's PP1/PP2 usage rate from recent games.
+    PP1 usage = avg share of ranks 2-4 players (excludes QB skew).
+    PP2 usage = 1 - PP1 usage.
+    """
+    print(f"Computing team PP baselines (last {last_n_games} games)...")
+    pbp = pd.read_csv(pbp_path, low_memory=False)
+    tgl = pd.read_csv(team_logs_path, low_memory=False)
+    tgl["date"] = pd.to_datetime(tgl["date"])
+
+    team_pp  = tgl[["game_id","team","pp_toi","date"]].rename(
+        columns={"pp_toi":"team_pp_toi"})
+    df = pbp.merge(team_pp, on=["game_id","team"], how="left")
+    df = df[df["team_pp_toi"] > 1.0]
+
+    game_dates = tgl[["game_id","date"]].drop_duplicates().set_index("game_id")["date"]
+    df["date"] = df["game_id"].map(game_dates)
+
+    baselines = {}
+    for team, team_grp in df.groupby("team"):
+        recent_game_ids = (
+            team_grp[["game_id","date"]]
+            .drop_duplicates()
+            .sort_values("date")
+            .tail(last_n_games)["game_id"]
+        )
+        team_recent = team_grp[team_grp["game_id"].isin(recent_game_ids)]
+
+        game_pp1_usages = []
+        for game_id, game_grp in team_recent[team_recent["toi_pp"] > 0].groupby("game_id"):
+            game_grp    = game_grp.sort_values("toi_pp", ascending=False).reset_index(drop=True)
+            team_pp_tot = game_grp["team_pp_toi"].iloc[0]
+            if team_pp_tot < 1 or len(game_grp) < 4:
+                continue
+            game_grp["share"] = game_grp["toi_pp"] / (team_pp_tot + 1e-6)
+            pp1_usage = game_grp.iloc[1:4]["share"].mean()
+            if pd.notna(pp1_usage):
+                game_pp1_usages.append(pp1_usage)
+
+        if game_pp1_usages:
+            pp1 = float(np.mean(game_pp1_usages))
+            baselines[team] = {
+                "pp1_usage": pp1,
+                "pp2_usage": 1.0 - pp1,
+                "games":     len(game_pp1_usages),
+            }
+
+    print(f"  Baselines computed for {len(baselines)} teams")
+    sample = sorted(baselines.items(), key=lambda x: -x[1]["pp1_usage"])[:5]
+    for team, bl in sample:
+        print(f"    {team}: PP1={bl['pp1_usage']:.3f}  PP2={bl['pp2_usage']:.3f}  "
+              f"games={bl['games']}")
+    return baselines
+
+
+def compute_recent_player_pp_shares(pbp_path, team_logs_path, last_n_games=10):
+    """
+    Compute each player's PP TOI share from their last N games with PP time.
+    Captures recent role changes faster than season averages.
+    """
+    print(f"Computing recent player PP shares (last {last_n_games} PP games)...")
+    pbp = pd.read_csv(pbp_path, low_memory=False)
+    tgl = pd.read_csv(team_logs_path, low_memory=False)
+    tgl["date"] = pd.to_datetime(tgl["date"])
+
+    team_pp = tgl[["game_id","team","pp_toi"]].rename(columns={"pp_toi":"team_pp_toi"})
+    df = pbp.merge(team_pp, on=["game_id","team"], how="left")
+    df = df[df["team_pp_toi"] > 1.0]
+
+    game_dates = tgl[["game_id","date"]].drop_duplicates().set_index("game_id")["date"]
+    df["date"] = df["game_id"].map(game_dates)
+    df["pp_share"] = df["toi_pp"] / (df["team_pp_toi"] + 1e-6)
+
+    # Only games where player had meaningful PP time
+    df = df[df["toi_pp"] > 0.3]
+
+    recent_shares = {}
+    for player_id, grp in df.groupby("player_id"):
+        grp = grp.sort_values("date").tail(last_n_games)
+        if len(grp) < 3:
+            continue
+        recent_shares[int(player_id)] = {
+            "avg_share": float(grp["pp_share"].mean()),
+            "games":     len(grp),
+        }
+
+    print(f"  Recent shares for {len(recent_shares):,} players")
+    return recent_shares
+
+
+def get_pp_share(player_id, team, pp_unit, feature_row,
+                 pp_shares, team_pp_baselines, recent_shares):
+    """
+    Get player's expected PP TOI share of team PP time.
+
+    Logic (lineup role is primary):
+    1. Start with team's PP1 or PP2 baseline (from lineup assignment)
+    2. Nudge based on recent games (last 10 with PP time) — moderate weight
+    3. Nudge based on season history — small weight, only if same role
+    """
+    if pp_unit == 0:
+        return PP_SHARE_FALLBACK[0]
+
+    # Step 1: team baseline for this unit (primary signal from lineup)
+    team_bl       = team_pp_baselines.get(str(team), {})
+    team_baseline = team_bl.get(
+        "pp1_usage" if pp_unit == 1 else "pp2_usage",
+        PP_SHARE_FALLBACK[pp_unit]
+    )
+
+    # Start from team baseline
+    share = team_baseline
+
+    # Step 2: recent games nudge (last 10 games with PP time)
+    recent = recent_shares.get(int(player_id))
+    if recent and recent["games"] >= 3:
+        # Weight recent more as sample grows, max 30% adjustment
+        recent_weight = min(recent["games"] / 10.0, 1.0) * 0.30
+        share = (1 - recent_weight) * share + recent_weight * recent["avg_share"]
+
+    # Step 3: season history nudge (only if same role, small weight)
+    try:
+        current_season = int(feature_row.get("season", 20252026))
+    except (TypeError, ValueError):
+        current_season = 20252026
+    s           = int(current_season)
+    prev_season = (s // 10000 - 1) * 10000 + (s % 10000 - 1)
+
+    hist = (pp_shares.get((int(player_id), str(team), current_season)) or
+            pp_shares.get((int(player_id), str(team), prev_season)))
+
+    if hist and int(hist["pp_unit_est"]) == pp_unit:
+        hist_games  = float(hist["games_with_pp"])
+        hist_share  = float(hist["avg_share"])
+        # Max 20% weight from history, only when same role
+        hist_weight = min(hist_games / 30.0, 1.0) * 0.20
+        share = (1 - hist_weight) * share + hist_weight * hist_share
+
+    return float(share)
 
 
 # ── Lineup loading ────────────────────────────────────────────────────────────
@@ -86,55 +261,48 @@ def load_lineup(date_str=None):
         path = files[-1]
 
     with open(path) as f:
-        data = __import__("json").load(f)
+        data = json.load(f)
 
     print(f"Lineup date: {data.get('date', 'unknown')}")
     return data["teams"]
 
 
 def extract_players_from_lineup(lineup, team, is_home):
-    """
-    Extract all players with their role context.
-    Returns list of dicts with name, position_group, line_num, pp_unit.
-    """
-    players = []
+    players   = []
     team_data = lineup.get(team, {})
 
-    # Forwards
     for line in team_data.get("forward_lines", []):
         line_num = line["line"]
-        for pos in ["lw", "c", "rw"]:
+        for pos in ["lw","c","rw"]:
             p = line.get(pos)
             if p and p.get("name"):
                 players.append({
-                    "name":     p["name"],
-                    "dfo_id":   p.get("dfo_id"),
+                    "name":           p["name"],
+                    "dfo_id":         p.get("dfo_id"),
                     "position_group": "F",
-                    "line_num": line_num,
-                    "pp_unit":  0,  # filled below
-                    "pk_unit":  0,
-                    "team":     team,
-                    "is_home":  is_home,
+                    "line_num":       line_num,
+                    "pp_unit":        0,
+                    "pk_unit":        0,
+                    "team":           team,
+                    "is_home":        is_home,
                 })
 
-    # Defense
     for pair in team_data.get("defense_pairs", []):
         pair_num = pair["pair"]
-        for pos in ["ld", "rd"]:
+        for pos in ["ld","rd"]:
             p = pair.get(pos)
             if p and p.get("name"):
                 players.append({
-                    "name":     p["name"],
-                    "dfo_id":   p.get("dfo_id"),
+                    "name":           p["name"],
+                    "dfo_id":         p.get("dfo_id"),
                     "position_group": "D",
-                    "line_num": pair_num,
-                    "pp_unit":  0,
-                    "pk_unit":  0,
-                    "team":     team,
-                    "is_home":  is_home,
+                    "line_num":       pair_num,
+                    "pp_unit":        0,
+                    "pk_unit":        0,
+                    "team":           team,
+                    "is_home":        is_home,
                 })
 
-    # Assign PP units
     pp1_names = {p["name"] for p in team_data.get("pp1", [])}
     pp2_names = {p["name"] for p in team_data.get("pp2", [])}
     pk1_names = {p["name"] for p in team_data.get("pk1", [])}
@@ -155,8 +323,6 @@ def extract_players_from_lineup(lineup, team, is_home):
 
 # ── Name matching ─────────────────────────────────────────────────────────────
 def normalize_name(name):
-    """Lowercase, remove accents/hyphens, strip middle names."""
-    import unicodedata
     name = unicodedata.normalize("NFD", name)
     name = "".join(c for c in name if unicodedata.category(c) != "Mn")
     name = name.lower().strip()
@@ -165,267 +331,181 @@ def normalize_name(name):
     return name
 
 
-def build_name_lookup(features_df):
-    """
-    Build multiple lookup dicts for flexible name matching.
-    Primary: full_name → {player_id, position, team}
-    Secondary: normalized name → player_id
-    """
-    current = features_df[features_df["season"] == features_df["season"].max()].copy()
+def expand_name_variants(name):
+    parts    = name.strip().split()
+    if not parts:
+        return [name]
+    first    = parts[0].lower()
+    rest     = " ".join(parts[1:])
+    variants = {name}
+    if first in NICKNAMES:
+        variants.add(f"{NICKNAMES[first].capitalize()} {rest}")
+    if first in NICKNAMES_REVERSE:
+        variants.add(f"{NICKNAMES_REVERSE[first].capitalize()} {rest}")
+    return list(variants)
 
-    # Primary lookup: exact name
-    primary = {}
+
+def build_name_lookup(features_df):
+    current   = features_df[features_df["season"] == features_df["season"].max()].copy()
+    primary   = {}
+    secondary = {}
+    tertiary  = {}
+
     for _, row in current.drop_duplicates(subset=["player_id"]).iterrows():
-        name = row["full_name"]
-        if name not in primary:
-            primary[name] = []
-        primary[name].append({
+        name  = row["full_name"]
+        entry = {
             "player_id": row["player_id"],
             "position":  row["position"],
             "team":      row["team"],
-        })
-
-    # Secondary: normalized name → list of player_ids
-    secondary = {}
-    for name, entries in primary.items():
-        norm = normalize_name(name)
-        if norm not in secondary:
-            secondary[norm] = []
-        secondary[norm].extend(entries)
-
-    # Tertiary: last name only (for partial matches)
-    tertiary = {}
-    for name, entries in primary.items():
-        last = normalize_name(name.split()[-1])
-        if last not in tertiary:
-            tertiary[last] = []
-        tertiary[last].extend(entries)
+        }
+        primary.setdefault(name, []).append(entry)
+        secondary.setdefault(normalize_name(name), []).append(entry)
+        tertiary.setdefault(normalize_name(name.split()[-1]), []).append(entry)
 
     return primary, secondary, tertiary
 
 
 def match_player(dfo_name, position_group, team, primary, secondary, tertiary):
-    """Try multiple strategies to match a DFO name to a player_id."""
-
-    # Common nickname <-> formal name mappings (bidirectional)
-NICKNAMES = {
-    "matt": "matthew",
-    "mike": "michael",
-    "alex": "alexander",
-    "nick": "nicholas",
-    "mitch": "mitchell",
-    "cal": "callan",
-    "zach": "zachary",
-    "jake": "jacob",
-    "pat": "patrick",
-    "tj": "timothy",
-    "jp": "jean-pierre",
-    "j.t.": "john",
-    "jt": "john",
-    "phil": "philip",
-    "will": "william",
-    "bill": "william",
-    "rick": "richard",
-    "dan": "daniel",
-    "max": "maxim",
-    "jon": "jonathan",
-    "tom": "thomas",
-    "rob": "robert",
-    "bob": "robert",
-    "cam": "cameron",
-    "nate": "nathan",
-    "drew": "andrew",
-    "steve": "steven",
-    "chris": "christopher",
-    "tony": "anthony",
-    "brad": "bradley",
-    "sam": "samuel",
-    "mat": "matthew",
-}
-# Build reverse mapping too
-NICKNAMES_REVERSE = {v: k for k, v in NICKNAMES.items()}
-
-
-def expand_name_variants(name):
-    """
-    Generate all plausible name variants for a given name.
-    e.g. "Matt Savoie" → ["Matt Savoie", "Matthew Savoie"]
-         "Matthew Savoie" → ["Matthew Savoie", "Matt Savoie"]
-    """
-    parts = name.strip().split()
-    if not parts:
-        return [name]
-
-    first = parts[0].lower()
-    rest  = " ".join(parts[1:])
-    variants = set()
-
-    # Original
-    variants.add(name)
-
-    # Nickname → formal
-    if first in NICKNAMES:
-        formal_first = NICKNAMES[first].capitalize()
-        variants.add(f"{formal_first} {rest}")
-
-    # Formal → nickname
-    if first in NICKNAMES_REVERSE:
-        nick_first = NICKNAMES_REVERSE[first].capitalize()
-        variants.add(f"{nick_first} {rest}")
-
-    # Also try normalized versions of all variants
-    result = list(variants)
-    return result
-
-
-def match_player(dfo_name, position_group, team, primary, secondary, tertiary):
-    """Try multiple strategies to match a DFO name to a player_id."""
-
     def pick_best(entries):
-        """If multiple entries, pick by position then team."""
         if len(entries) == 1:
             return entries[0]["player_id"]
-        # Try position match
         pos_matches = [e for e in entries
                        if (position_group == "D" and e["position"] == "D") or
                           (position_group == "F" and e["position"] != "D")]
         if len(pos_matches) == 1:
             return pos_matches[0]["player_id"]
-        # Try team match
         team_matches = [e for e in entries if e["team"] == team]
         if len(team_matches) == 1:
             return team_matches[0]["player_id"]
-        # Fall back to first
         return entries[0]["player_id"]
 
-    # Generate all name variants to try
+    parts    = dfo_name.split()
     variants = expand_name_variants(dfo_name)
-
-    # Also add middle-name-stripped variant
-    parts = dfo_name.split()
     if len(parts) > 2:
         short = f"{parts[0]} {parts[-1]}"
         variants.append(short)
         variants.extend(expand_name_variants(short))
 
-    # Strategy 1: exact match on any variant
-    for variant in variants:
-        if variant in primary:
-            return pick_best(primary[variant])
-
-    # Strategy 2: normalized match on any variant
-    for variant in variants:
-        norm = normalize_name(variant)
+    for v in variants:
+        if v in primary:
+            return pick_best(primary[v])
+    for v in variants:
+        norm = normalize_name(v)
         if norm in secondary:
             return pick_best(secondary[norm])
-
-    # Strategy 3: last name + team
     last = normalize_name(parts[-1])
     if last in tertiary:
         team_matches = [e for e in tertiary[last] if e["team"] == team]
-        if len(team_matches) == 1:
-            return team_matches[0]["player_id"]
         if team_matches:
             return pick_best(team_matches)
-
     return None
 
 
 # ── Feature preparation ───────────────────────────────────────────────────────
 def get_player_features(player_id, features_df, player_info):
-    """Get most recent feature row for a player, add lineup context."""
     rows = features_df[features_df["player_id"] == player_id].sort_values("date")
     if len(rows) == 0:
         return None
-
     row = rows.iloc[-1].copy()
-
-    # Override with today's lineup context
     row["is_home"]    = int(player_info["is_home"])
     row["is_defense"] = int(player_info["position_group"] == "D")
     row["is_forward"] = int(player_info["position_group"] == "F")
-    row["is_center"]  = int(row.get("position", "") == "C")
-
-    # PP unit as numeric feature
-    row["pp_unit"]    = player_info["pp_unit"]
-    row["line_num"]   = player_info["line_num"]
-
+    row["is_center"]  = int(str(row.get("position","")) == "C")
     return row
 
 
 # ── Prediction ────────────────────────────────────────────────────────────────
-def predict_player(feature_row, models, feature_lists, model_types, calibrators):
-    """Run all models for one player, return raw predictions."""
-    preds = {}
+def predict_player(feature_row, player_info, models, feature_lists,
+                   model_types, calibrators, pp_shares,
+                   team_pp_baselines, recent_shares):
+    preds      = {}
+    is_defense = int(feature_row.get("is_defense", 0))
+    player_id  = feature_row.get("player_id", 0)
+    team       = player_info.get("team", "")
+    pp_unit    = int(player_info.get("pp_unit", 0))
 
-    for target, model in models.items():
-        feats = feature_lists[target]
-        # Build input row — fill missing features with 0
-        x = np.array([feature_row.get(f, 0) or 0 for f in feats]).reshape(1, -1)
-        x = np.nan_to_num(x, nan=0.0)
-        import pandas as pd
-        X = pd.DataFrame(x, columns=feats)
+    for model_name, model in models.items():
+        if model_name == "scored_ev_goal_f" and is_defense:
+            continue
+        if model_name == "scored_ev_goal_d" and not is_defense:
+            continue
+        if model_name == "toi_pp":
+            continue
 
-        mtype = model_types[target]
+        feats = feature_lists[model_name]
+        x     = np.array([feature_row.get(f, 0) or 0 for f in feats]).reshape(1, -1)
+        x     = np.nan_to_num(x, nan=0.0)
+        X     = pd.DataFrame(x, columns=feats)
+
+        mtype = model_types[model_name]
         if mtype == "classifier":
             raw_prob = model.predict_proba(X)[0, 1]
-            if target in calibrators:
-                prob = float(calibrators[target].transform([raw_prob])[0])
+            if model_name in calibrators:
+                prob = float(calibrators[model_name].transform([raw_prob])[0])
             else:
                 prob = raw_prob
-            preds[target] = prob
+            preds["scored_ev_goal"] = prob
         else:
-            preds[target] = float(model.predict(X)[0])
+            preds[model_name] = float(model.predict(X)[0])
 
+    # PP TOI via formula: team_pp_toi × player_pp_share
+    pp_share = get_pp_share(player_id, team, pp_unit, feature_row,
+                            pp_shares, team_pp_baselines, recent_shares)
+
+    # Team PP TOI — use last20 rolling average (most recent)
+    team_pp_toi = (
+        feature_row.get("team_pp_toi_last20") or
+        feature_row.get("team_pp_toi_last10") or
+        feature_row.get("team_pp_toi_season_avg") or
+        5.15
+    )
+    try:
+        team_pp_toi = float(team_pp_toi)
+        if np.isnan(team_pp_toi) or team_pp_toi < 0.5:
+            team_pp_toi = 5.15
+    except (TypeError, ValueError):
+        team_pp_toi = 5.15
+
+    preds["toi_pp"] = pp_share * team_pp_toi
     return preds
 
 
 def compute_goals(preds, feature_row):
-    """
-    Compute expected goals using formula:
-      ev_goals = ev_shots × regressed_ev_shooting_pct × regressed_finishing_talent
-      pp_goals = pp_shots × career_pp_shooting_pct (fallback to league mean)
-    """
-    ev_shots    = max(preds.get("ev_shots", 0), 0)
-    pp_shots    = max(preds.get("pp_shots", 0), 0)
-    toi_sh       = float(feature_row.get("toi_sh_last20", 0) or 0)
-    sh_per60     = float(feature_row.get("regressed_sh_shots_per60", 5.44) or 5.44)
-    sh_shots     = toi_sh / 60 * sh_per60
+    ev_shots = max(preds.get("ev_shots", 0), 0)
+    pp_shots = max(preds.get("pp_shots", 0), 0)
+    toi_sh   = float(feature_row.get("toi_sh_last20", 0) or 0)
+    sh_per60 = float(feature_row.get("regressed_sh_shots_per60", 5.44) or 5.44)
+    sh_shots = toi_sh / 60 * sh_per60
 
-    ev_sh_pct   = float(feature_row.get("regressed_ev_shooting_pct", 0.098) or 0.098)
-    finishing   = float(feature_row.get("regressed_finishing_talent", 1.097) or 1.097)
+    ev_sh_pct = float(feature_row.get("regressed_ev_shooting_pct", 0.098) or 0.098)
+    finishing = float(feature_row.get("regressed_finishing_talent", 1.097) or 1.097)
+    pp_sh_pct = float(feature_row.get("regressed_pp_shooting_pct", 0.144) or 0.144)
 
-    pp_sh_pct = float(feature_row.get("regressed_pp_shooting_pct", 0.128) or 0.128)
-
-    ev_goals_lambda = ev_shots * ev_sh_pct * finishing
-    pp_goals_lambda = pp_shots * pp_sh_pct
+    ev_goals_lambda    = ev_shots * ev_sh_pct * finishing
+    pp_goals_lambda    = pp_shots * pp_sh_pct
     total_goals_lambda = ev_goals_lambda + pp_goals_lambda
 
     return {
-        "ev_goals_lambda": ev_goals_lambda,
-        "pp_goals_lambda": pp_goals_lambda,
+        "ev_goals_lambda":    ev_goals_lambda,
+        "pp_goals_lambda":    pp_goals_lambda,
         "total_goals_lambda": total_goals_lambda,
-        "ev_shots":  ev_shots,
-        "pp_shots":  pp_shots,
-        "sh_shots":  sh_shots,
+        "ev_shots":           ev_shots,
+        "pp_shots":           pp_shots,
+        "sh_shots":           sh_shots,
         "total_shots_lambda": ev_shots + pp_shots + sh_shots,
     }
 
 
 def compute_assists(preds):
-    ev_assists = max(preds.get("ev_assists", 0), 0)
-    pp_assists = max(preds.get("pp_assists", 0), 0)
-    return ev_assists + pp_assists
+    return max(preds.get("ev_assists", 0), 0) + max(preds.get("pp_assists", 0), 0)
 
 
 def poisson_over_prob(lam, line):
-    """P(X > line) where X ~ Poisson(lam), line is typically x.5."""
-    k = int(line + 0.5)  # e.g. line=0.5 → k=1, line=1.5 → k=2
+    k = int(line + 0.5)
     return 1 - poisson.cdf(k - 1, lam)
 
 
 def format_prob(p):
-    """Convert probability to American odds string."""
     p = max(0.001, min(0.999, p))
     if p >= 0.5:
         odds = -round((p / (1 - p)) * 100)
@@ -434,44 +514,13 @@ def format_prob(p):
     return f"{p:.1%} ({odds:+d})"
 
 
-# ── Main output ───────────────────────────────────────────────────────────────
-def print_player_props(player_name, role, computed, preds, lines_config=None):
-    shots_lam  = computed["total_shots_lambda"]
-    goals_lam  = computed["total_goals_lambda"]
-    assists_lam = preds.get("ev_assists", 0) + preds.get("pp_assists", 0)
-    points_lam  = goals_lam + assists_lam
-    p_goal     = preds.get("scored_ev_goal", goals_lam / max(goals_lam + 0.01, 1))
-
-    print(f"\n  {player_name} ({role})")
-    print(f"    TOI:     EV {preds.get('toi_ev',0):.1f}  PP {preds.get('toi_pp',0):.1f}")
-    print(f"    Shots:   EV {computed['ev_shots']:.1f}  PP {computed['pp_shots']:.1f}  Total {shots_lam:.1f}")
-    print(f"    Goals:   λ={goals_lam:.3f}  P(anytime scorer)={format_prob(p_goal)}")
-    print(f"    Assists: {assists_lam:.2f}")
-    print(f"    Points:  {points_lam:.2f}")
-
-    # Shot lines
-    print(f"    Shots o/u:")
-    for line in SHOT_LINES:
-        p = poisson_over_prob(shots_lam, line)
-        if 0.15 < p < 0.85:
-            print(f"      o{line}: {format_prob(p)}")
-
-    # Point lines
-    print(f"    Points o/u:")
-    for line in POINT_LINES:
-        p = poisson_over_prob(points_lam, line)
-        if 0.10 < p < 0.90:
-            print(f"      o{line}: {format_prob(p)}")
-
-
+# ── Main ──────────────────────────────────────────────────────────────────────
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("home_team", type=str)
     parser.add_argument("away_team", type=str)
-    parser.add_argument("--date", type=str, default=None,
-                        help="Date string YYYY-MM-DD (default: latest lineup file)")
-    parser.add_argument("--min-shots", type=float, default=1.0,
-                        help="Minimum projected shots to include player (default: 1.0)")
+    parser.add_argument("--date",      type=str,   default=None)
+    parser.add_argument("--min-shots", type=float, default=1.0)
     args = parser.parse_args()
 
     home_team = args.home_team.upper()
@@ -482,15 +531,24 @@ def main():
     print(f"PLAYER PROPS: {away_team} @ {home_team}")
     print(f"{'='*60}")
 
-    # Load everything
     print("\nLoading models...")
     models, feature_lists, model_types, calibrators, residual_stds = load_models()
-    print(f"  Loaded {len(models)} models")
+
+    print("Loading PP shares...")
+    pp_shares = load_pp_shares()
+    print(f"  {len(pp_shares):,} player-team-season records")
+
+    print("Computing team PP baselines...")
+    team_pp_baselines = compute_team_pp_baselines(PBP_FILE, TEAM_LOGS_FILE,
+                                                   last_n_games=20)
+
+    print("Computing recent player PP shares...")
+    recent_shares = compute_recent_player_pp_shares(PBP_FILE, TEAM_LOGS_FILE,
+                                                     last_n_games=10)
 
     print("Loading player features...")
     features_df = pd.read_csv(PLAYER_FEATURES, low_memory=False)
-    features_df["date"] = pd.to_datetime(features_df["date"])
-    # Encode position
+    features_df["date"]       = pd.to_datetime(features_df["date"])
     features_df["is_defense"] = (features_df["position"] == "D").astype(int)
     features_df["is_forward"] = (features_df["position"] != "D").astype(int)
     features_df["is_center"]  = (features_df["position"] == "C").astype(int)
@@ -513,18 +571,21 @@ def main():
         print(f"  {team} ({'HOME' if is_home else 'AWAY'}) — {len(players)} players")
         print(f"{'='*60}")
 
-        team_shots   = 0.0
-        team_goals   = 0.0
-        matched      = 0
+        bl = team_pp_baselines.get(team, {})
+        print(f"  Team PP usage: PP1={bl.get('pp1_usage',0.670):.3f}  "
+              f"PP2={bl.get('pp2_usage',0.330):.3f}  "
+              f"games={bl.get('games',0)}")
+
+        team_shots      = 0.0
+        team_goals      = 0.0
         unmatched_names = []
-        player_rows  = []
+        player_rows     = []
 
         for p in players:
             pid = match_player(
                 p["name"], p["position_group"], team,
                 primary, secondary, tertiary
             )
-
             if pid is None:
                 unmatched_names.append(p["name"])
                 continue
@@ -534,41 +595,38 @@ def main():
                 unmatched_names.append(p["name"])
                 continue
 
-            matched += 1
-            preds    = predict_player(feat_row, models, feature_lists,
-                                      model_types, calibrators)
+            preds    = predict_player(feat_row, p, models, feature_lists,
+                                      model_types, calibrators, pp_shares,
+                                      team_pp_baselines, recent_shares)
             computed = compute_goals(preds, feat_row)
             assists  = compute_assists(preds)
 
-            # Build role label
-            pos_label = p["position_group"]
+            pos_label  = p["position_group"]
             line_label = f"L{p['line_num']}"
             pp_label   = f" PP{p['pp_unit']}" if p["pp_unit"] > 0 else ""
-            role = f"{pos_label} {line_label}{pp_label}"
+            role       = f"{pos_label} {line_label}{pp_label}"
 
             team_shots += computed["total_shots_lambda"]
             team_goals += computed["total_goals_lambda"]
 
             player_rows.append({
-                "name":    p["name"],
-                "role":    role,
-                "toi_ev":  preds.get("toi_ev", 0),
-                "toi_pp":  preds.get("toi_pp", 0),
-                "shots":   computed["total_shots_lambda"],
-                "ev_shots":computed["ev_shots"],
-                "pp_shots":computed["pp_shots"],
-                "goals":   computed["total_goals_lambda"],
-                "assists": assists,
-                "points":  computed["total_goals_lambda"] + assists,
-                "p_goal":  preds.get("scored_ev_goal", 0),
-                "preds":   preds,
-                "computed":computed,
+                "name":     p["name"],
+                "role":     role,
+                "toi_ev":   preds.get("toi_ev", 0),
+                "toi_pp":   preds.get("toi_pp", 0),
+                "shots":    computed["total_shots_lambda"],
+                "ev_shots": computed["ev_shots"],
+                "pp_shots": computed["pp_shots"],
+                "goals":    computed["total_goals_lambda"],
+                "assists":  assists,
+                "points":   computed["total_goals_lambda"] + assists,
+                "p_goal":   preds.get("scored_ev_goal", 0),
+                "preds":    preds,
+                "computed": computed,
             })
 
-        # Sort by projected shots descending
         player_rows.sort(key=lambda x: x["shots"], reverse=True)
 
-        # Print table
         print(f"\n  {'Player':<22} {'Role':<12} {'TOI_EV':>6} {'TOI_PP':>6} "
               f"{'Shots':>6} {'Goals':>6} {'Assists':>7} {'Points':>7}")
         print(f"  {'-'*22} {'-'*12} {'-'*6} {'-'*6} {'-'*6} {'-'*6} {'-'*7} {'-'*7}")
@@ -587,13 +645,12 @@ def main():
             print(f"\n  Unmatched ({len(unmatched_names)}): {', '.join(unmatched_names)}")
 
         team_results[team] = {
-            "players": player_rows,
+            "players":    player_rows,
             "team_shots": team_shots,
             "team_goals": team_goals,
-            "is_home": is_home,
+            "is_home":    is_home,
         }
 
-    # Game summary
     if len(team_results) == 2:
         print(f"\n{'='*60}")
         print(f"GAME SUMMARY")
@@ -606,7 +663,6 @@ def main():
         total_goals = sum(r["team_goals"] for r in team_results.values())
         print(f"  Game total: {total_shots:.1f} shots  {total_goals:.2f} goals")
 
-        # Top shot props
         print(f"\n  TOP SHOT PROPS (o2.5):")
         all_players = []
         for res in team_results.values():
@@ -616,6 +672,20 @@ def main():
             p_over = poisson_over_prob(r["shots"], 2.5)
             print(f"    {r['name']:<22} {r['shots']:.1f} shots  "
                   f"o2.5: {format_prob(p_over)}")
+
+        print(f"\n  TOP GOAL PROPS (anytime scorer):")
+        all_players.sort(key=lambda x: x["goals"], reverse=True)
+        for r in all_players[:10]:
+            p_goal = poisson_over_prob(r["goals"], 0.5)
+            print(f"    {r['name']:<22} λ={r['goals']:.3f}  "
+                  f"anytime: {format_prob(p_goal)}")
+
+        print(f"\n  TOP POINT PROPS (o0.5):")
+        all_players.sort(key=lambda x: x["points"], reverse=True)
+        for r in all_players[:10]:
+            p_point = poisson_over_prob(r["points"], 0.5)
+            print(f"    {r['name']:<22} {r['points']:.3f} pts  "
+                  f"o0.5: {format_prob(p_point)}")
 
 
 if __name__ == "__main__":

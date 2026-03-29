@@ -4,19 +4,22 @@ process_player_features.py
 Builds per-player per-game feature dataset for player modeling.
 
 Sources:
-  - data/raw/game_logs/player_game_logs.csv       (11 seasons basic stats)
-  - data/raw/player_pbp_stats/player_pbp_stats.csv (2 seasons strength splits + on-ice)
-  - data/processed/shot_data_with_xg.csv           (4 seasons individual xG)
-  - data/raw/team_game_logs/team_game_logs.csv      (team context)
+  - data/raw/game_logs/player_game_logs.csv         (11 seasons basic stats)
+  - data/raw/player_pbp_stats/player_pbp_stats.csv  (6 seasons strength splits + on-ice + Corsi)
+  - data/processed/shot_data_with_xg.csv            (4 seasons individual xG)
+  - data/raw/team_game_logs/team_game_logs.csv       (team context)
+  - data/raw/player_pp_stats.csv                    (11 seasons PP shots/goals from NHL API)
+  - data/raw/player_corsi_stats.csv                 (11 seasons Corsi from NHL API)
 
 Output: data/processed/player_features.csv
 
 Rolling windows: last5/10/20/30 — within season only (reset at season boundary)
 Season avg: expanding mean within season
 Career features: cross-season (no reset)
+Corsi rolling features: only from 20202021+ (real per-game PBP data)
+PP TOI share: weighted EWM over past seasons (recent weighted more)
 """
 
-import os
 import warnings
 from pathlib import Path
 
@@ -28,12 +31,13 @@ warnings.filterwarnings("ignore")
 ROOT     = Path(__file__).resolve().parents[1]
 DATA_DIR = ROOT / "data"
 
-PLAYER_PP  = DATA_DIR / "raw/player_pp_stats.csv"
-PLAYER_GL   = DATA_DIR / "raw/game_logs/player_game_logs.csv"
-PLAYER_PBP  = DATA_DIR / "raw/player_pbp_stats/player_pbp_stats.csv"
-SHOT_XG     = DATA_DIR / "processed/shot_data_with_xg.csv"
-TEAM_GL     = DATA_DIR / "raw/team_game_logs/team_game_logs.csv"
-OUT_FILE    = DATA_DIR / "processed/player_features.csv"
+PLAYER_GL    = DATA_DIR / "raw/game_logs/player_game_logs.csv"
+PLAYER_PBP   = DATA_DIR / "raw/player_pbp_stats/player_pbp_stats.csv"
+SHOT_XG      = DATA_DIR / "processed/shot_data_with_xg.csv"
+TEAM_GL      = DATA_DIR / "raw/team_game_logs/team_game_logs.csv"
+PLAYER_PP    = DATA_DIR / "raw/player_pp_stats.csv"
+PLAYER_CORSI = DATA_DIR / "raw/player_corsi_stats.csv"
+OUT_FILE     = DATA_DIR / "processed/player_features.csv"
 
 ROLLING_WINDOWS = [5, 10, 20, 30]
 MIN_SEASON      = 20152016
@@ -52,6 +56,14 @@ ROLL_STATS = [
     "ev_cf_pct",
     "ipp", "ev_toi_share", "pp_toi_share",
     "hits", "blocks", "faceoffs_won", "faceoffs_taken",
+    "is_pp_player",
+    # Corsi — only populated for 20202021+
+    "indiv_shot_attempts", "indiv_missed_shots", "indiv_shots_blocked",
+    "ev_shot_attempts", "pp_shot_attempts",
+    "ev_missed_shots", "pp_missed_shots",
+    "ev_shots_blocked_by_opp", "pp_shots_blocked_by_opp",
+    "indiv_shot_attempts_per60", "ev_shot_attempts_per60", "pp_shot_attempts_per60",
+    "team_pp_toi", "team_ev_toi",
 ]
 
 
@@ -72,6 +84,9 @@ def load_base(gl_path, pbp_path):
         "game_id", "player_id",
         "toi_ev", "toi_pp", "toi_sh", "toi_en",
         "ev_shots", "pp_shots", "sh_shots",
+        "ev_missed_shots", "pp_missed_shots", "sh_missed_shots",
+        "ev_shots_blocked_by_opp", "pp_shots_blocked_by_opp", "sh_shots_blocked_by_opp",
+        "ev_shot_attempts", "pp_shot_attempts", "sh_shot_attempts",
         "ev_goals", "pp_goals", "sh_goals",
         "ev_assists", "pp_assists", "sh_assists",
         "ev_onice_sf", "ev_onice_sa",
@@ -87,9 +102,7 @@ def load_base(gl_path, pbp_path):
     print(f"  After merge: {len(df):,} rows")
     print(f"  Rows with PBP data: {df['toi_ev'].notna().sum():,}")
 
-    # Fix merge column collisions BEFORE anything else
-    # pp_goals_x = from game_logs (all seasons), pp_goals_y = from PBP (2 seasons)
-    # Use game_logs as authoritative source for pp_goals and sh_goals
+    # Fix merge column collisions
     for base in ["pp_goals", "sh_goals"]:
         x_col, y_col = f"{base}_x", f"{base}_y"
         if x_col in df.columns:
@@ -123,7 +136,7 @@ def load_base(gl_path, pbp_path):
     ).clip(lower=0)
 
     fill_zero = [c for c in df.columns if "onice" in c] + [
-        "hits","blocks","faceoffs_won","faceoffs_taken","giveaways","takeaways"
+        "hits","blocks","faceoffs_won","faceoffs_taken","giveaways","takeaways",
     ]
     for c in fill_zero:
         if c in df.columns:
@@ -178,37 +191,73 @@ def add_team_context(df, team_gl_path):
     print(f"  Team context added: {df['team_ev_toi'].notna().sum():,} rows")
     return df
 
+
 def add_pp_career_stats(df, pp_path):
+    """Join accurate PP shots/goals from NHL stats API."""
     print("Adding career PP stats...")
     pp = pd.read_csv(pp_path, low_memory=False)
     pp = pp[["player_id","season","pp_goals","pp_shots","pp_toi_sec"]].copy()
     pp.columns = ["player_id","season","pp_goals_api","pp_shots_api","pp_toi_sec_api"]
+    pp = pp.groupby(["player_id","season"]).sum().reset_index()
 
-    # Deduplicate — keep one row per player per season
-    pp = pp.groupby(["player_id","season"]).agg({
-        "pp_goals_api": "sum",
-        "pp_shots_api": "sum",
-        "pp_toi_sec_api": "sum"
-    }).reset_index()
-
-    # Join per player per season
     df = df.merge(pp, on=["player_id","season"], how="left")
 
-    # Distribute season totals evenly across games
     games_per_season = df.groupby(["player_id","season"])["game_id"].transform("count")
     df["pp_shots_api_per_game"] = df["pp_shots_api"] / games_per_season.clip(lower=1)
 
-    # Fill: pre-PBP seasons use API per-game, PBP seasons use actual PBP pp_shots
-    pre_pbp = df["season"] < 20242025
+    # Use API per-game for pre-PBP seasons, actual PBP for 20202021+
+    pre_pbp = df["season"] < 20202021
     df["pp_shots_api_filled"] = np.where(
         pre_pbp,
-        df["pp_shots_api_per_game"].fillna(0),  # fillna(0) for players with no API data
+        df["pp_shots_api_per_game"].fillna(0),
         df["pp_shots"].fillna(0)
     )
 
     print(f"  PP API data joined: {df['pp_shots_api'].notna().sum():,} rows")
     df = df.drop(columns=["pp_shots_api_per_game"], errors="ignore")
     return df
+
+
+def add_corsi_stats(df, corsi_path):
+    """
+    Add individual Corsi components.
+    For 20202021+: use actual per-game PBP values.
+    For pre-20202021: set to NaN — season API averages are constants
+    that pollute rolling window features.
+    """
+    print("Adding individual shot attempt stats...")
+
+    pre_pbp = df["season"] < 20202021
+
+    df["indiv_shot_attempts"] = np.where(
+        pre_pbp, np.nan,
+        df["ev_shot_attempts"].fillna(0) +
+        df["pp_shot_attempts"].fillna(0) +
+        df["sh_shot_attempts"].fillna(0)
+    )
+    df["indiv_missed_shots"] = np.where(
+        pre_pbp, np.nan,
+        df["ev_missed_shots"].fillna(0) +
+        df["pp_missed_shots"].fillna(0) +
+        df["sh_missed_shots"].fillna(0)
+    )
+    df["indiv_shots_blocked"] = np.where(
+        pre_pbp, np.nan,
+        df["ev_shots_blocked_by_opp"].fillna(0) +
+        df["pp_shots_blocked_by_opp"].fillna(0) +
+        df["sh_shots_blocked_by_opp"].fillna(0)
+    )
+
+    for col in ["ev_shot_attempts","pp_shot_attempts","sh_shot_attempts",
+                "ev_missed_shots","pp_missed_shots","sh_missed_shots",
+                "ev_shots_blocked_by_opp","pp_shots_blocked_by_opp","sh_shots_blocked_by_opp"]:
+        if col in df.columns:
+            df.loc[pre_pbp, col] = np.nan
+
+    pbp_rows = (~pre_pbp & df["indiv_shot_attempts"].notna()).sum()
+    print(f"  Corsi data available: {pbp_rows:,} rows (20202021+)")
+    return df
+
 
 def add_game_rates(df):
     print("Computing per-game rates...")
@@ -217,7 +266,7 @@ def add_game_rates(df):
     df["ev_shooting_pct"] = df["ev_goals"] / (df["ev_shots"] + eps)
     df["pp_shooting_pct"] = df["pp_goals"] / (df["pp_shots"] + eps)
     df["ev_toi_share"]    = df["toi_ev"] / (df["team_ev_toi"].fillna(60) + eps)
-    df["pp_toi_share"]    = df["toi_pp"] / (df["team_pp_toi"].fillna(5) + eps)
+    df["pp_toi_share"]    = df["toi_pp"] / (df["team_pp_toi"].fillna(5)  + eps)
 
     df["ev_onice_sf_per60"] = df["ev_onice_sf"] / (df["toi_ev"] / 60 + eps)
     df["ev_onice_sa_per60"] = df["ev_onice_sa"] / (df["toi_ev"] / 60 + eps)
@@ -229,22 +278,26 @@ def add_game_rates(df):
     df["ev_ixg_per60"]     = df["ev_ixg"]   / (df["toi_ev"] / 60 + eps)
     df["pp_ixg_per60"]     = df["pp_ixg"]   / (df["toi_pp"] / 60 + eps)
 
-    # Goals per 60 (more stable than raw goals for modeling)
-    df["ev_goals_per60"]   = df["ev_goals"] / (df["toi_ev"] / 60 + eps)
-    df["pp_goals_per60"]   = df["pp_goals"] / (df["toi_pp"] / 60 + eps)
-    df["ev_goals_per60"]   = df["ev_goals_per60"].clip(0, 10)
-    df["pp_goals_per60"]   = df["pp_goals_per60"].clip(0, 10)
+    df["ev_goals_per60"]   = (df["ev_goals"] / (df["toi_ev"] / 60 + eps)).clip(0, 10)
+    df["pp_goals_per60"]   = (df["pp_goals"] / (df["toi_pp"] / 60 + eps)).clip(0, 10)
 
-    df["ipp"]      = (df["ev_goals"] + df["ev_assists"]) / (df["ev_onice_gf"] + eps)
-    df["ipp"]      = df["ipp"].clip(0, 1)
+    df["indiv_shot_attempts_per60"] = df["indiv_shot_attempts"] / (df["toi"] / 60 + eps)
+    df["ev_shot_attempts_per60"]    = df["ev_shot_attempts"]    / (df["toi_ev"] / 60 + eps)
+    df["pp_shot_attempts_per60"]    = df["pp_shot_attempts"]    / (df["toi_pp"] / 60 + eps)
+    for col in ["indiv_shot_attempts_per60","ev_shot_attempts_per60","pp_shot_attempts_per60"]:
+        df[col] = df[col].clip(0, 200)
+
+    df["ipp"]       = (df["ev_goals"] + df["ev_assists"]) / (df["ev_onice_gf"] + eps)
+    df["ipp"]       = df["ipp"].clip(0, 1)
     df["ev_cf_pct"] = df["ev_onice_sf"] / (df["ev_onice_sf"] + df["ev_onice_sa"] + eps)
 
-    # Goals vs xG ratio (finishing talent — per game)
-    df["ev_goals_per_ixg"] = df["ev_goals"] / (df["ev_ixg"] + eps)
-    df["ev_goals_per_ixg"] = df["ev_goals_per_ixg"].clip(0, 10)
+    df["ev_goals_per_ixg"] = (df["ev_goals"] / (df["ev_ixg"] + eps)).clip(0, 10)
 
     df["scored_ev_goal"] = (df["ev_goals"] > 0).astype(int)
     df["scored_pp_goal"] = (df["pp_goals"] > 0).astype(int)
+
+    # PP player indicator
+    df["is_pp_player"] = (df["toi_pp"] > 0.5).astype(float)
 
     for col in ["ev_shots_per60","pp_shots_per60","ev_ixg_per60","pp_ixg_per60",
                 "ev_onice_sf_per60","ev_onice_sa_per60"]:
@@ -260,17 +313,16 @@ def add_trend_features(df):
     print("Computing trend and EWM features...")
     df = df.sort_values(["player_id","season","date"]).reset_index(drop=True)
 
-    TREND_STATS = ["toi_ev", "toi_pp", "ev_shots", "pp_shots", "ixg"]
+    TREND_STATS = ["toi_ev", "toi_pp", "ev_shots", "pp_shots", "ixg",
+                   "indiv_shot_attempts", "ev_shot_attempts"]
 
     for stat in TREND_STATS:
         if stat not in df.columns:
             continue
         grp = df.groupby(["player_id","season"])[stat]
-
         df[f"{stat}_ewm10"] = grp.transform(
             lambda x: x.shift(1).ewm(span=10, min_periods=1).mean()
         )
-
         l5_col  = f"{stat}_last5"
         l20_col = f"{stat}_last20"
         if l5_col in df.columns and l20_col in df.columns:
@@ -339,12 +391,10 @@ def add_rolling_features(df):
         (1 - w_career) * LEAGUE_SH_PCT
     ).fillna(LEAGUE_SH_PCT)
 
-    # Career PP shooting% using accurate API PP shots
+    # Career PP shooting%
     LEAGUE_PP_SH_PCT = 0.144
     PP_REGRESSION_N  = 30
-
     pp_shots_col = "pp_shots_api_filled" if "pp_shots_api_filled" in df.columns else "pp_shots"
-
     career_pp_shots = df.groupby("player_id")[pp_shots_col].transform(
         lambda x: x.shift(1).expanding().sum()
     )
@@ -358,9 +408,9 @@ def add_rolling_features(df):
         (1 - w_pp) * LEAGUE_PP_SH_PCT
     ).fillna(LEAGUE_PP_SH_PCT)
 
-    # Career SH shots per 60 SH TOI
+    # Career SH shots per 60
     LEAGUE_SH_SHOTS_PER60 = 5.44
-    SH_REGRESSION_N       = 20   # minutes of SH TOI to regress toward mean
+    SH_REGRESSION_N       = 20
     career_sh_shots = df.groupby("player_id")["sh_shots"].transform(
         lambda x: x.shift(1).expanding().sum()
     )
@@ -383,8 +433,8 @@ def add_rolling_features(df):
         lambda x: x["ev_goals"].where(x["ev_ixg"] > 0).shift(1).expanding().sum()
     ).reset_index(level=0, drop=True)
 
-    df["career_ev_ixg_xg"]   = career_ev_ixg_xg.fillna(0)
-    df["career_ev_goals_xg"]  = career_ev_goals_xg.fillna(0)
+    df["career_ev_ixg_xg"]       = career_ev_ixg_xg.fillna(0)
+    df["career_ev_goals_xg"]      = career_ev_goals_xg.fillna(0)
     df["career_finishing_talent"] = (
         df["career_ev_goals_xg"] / (df["career_ev_ixg_xg"] + 1e-6)
     )
@@ -393,6 +443,26 @@ def add_rolling_features(df):
         w_finish * df["career_finishing_talent"] + (1 - w_finish) * LEAGUE_FINISHING
     ).fillna(LEAGUE_FINISHING)
     df = df.drop(columns=["career_ev_ixg_xg","career_ev_goals_xg"])
+
+    # Weighted PP TOI share across past seasons (EWM, recent weighted more)
+    print("  Computing weighted PP TOI share...")
+    season_pp = df.groupby(["player_id","season"]).agg(
+        total_pp_toi  = ("toi_pp","sum"),
+        total_team_pp = ("team_pp_toi","sum"),
+    ).reset_index()
+    season_pp["season_pp_share"] = (
+        season_pp["total_pp_toi"] / (season_pp["total_team_pp"] + 1e-6)
+    ).clip(0, 1)
+    season_pp = season_pp.sort_values(["player_id","season"])
+    # EWM over past seasons — shift(1) so current season excluded
+    season_pp["weighted_pp_share"] = (
+        season_pp.groupby("player_id")["season_pp_share"]
+        .transform(lambda x: x.shift(1).ewm(span=2, min_periods=1).mean())
+    )
+    df = df.merge(
+        season_pp[["player_id","season","weighted_pp_share"]],
+        on=["player_id","season"], how="left"
+    )
 
     print(f"  Rolling features computed: {len(df):,} rows")
     return df
@@ -403,24 +473,27 @@ def add_cumulative_rates(df):
     df = df.sort_values(["player_id","season","date"]).reset_index(drop=True)
 
     CUM_PAIRS = [
-        ("ev_shots",    "toi_ev", "ev_shots_per60_cumulative"),
-        ("pp_shots",    "toi_pp", "pp_shots_per60_cumulative"),
-        ("ev_goals",    "toi_ev", "ev_goals_per60_cumulative"),
-        ("pp_goals",    "toi_pp", "pp_goals_per60_cumulative"),
-        ("ev_ixg",      "toi_ev", "ev_ixg_per60_cumulative"),
-        ("pp_ixg",      "toi_pp", "pp_ixg_per60_cumulative"),
-        ("ev_onice_sf", "toi_ev", "ev_onice_sf_per60_cumulative"),
-        ("ev_onice_sa", "toi_ev", "ev_onice_sa_per60_cumulative"),
-        ("ev_onice_gf", "toi_ev", "ev_onice_gf_per60_cumulative"),
-        ("ev_onice_ga", "toi_ev", "ev_onice_ga_per60_cumulative"),
-        ("hits",        "toi",    "hits_per60_cumulative"),
-        ("blocks",      "toi",    "blocks_per60_cumulative"),
+        ("ev_shots",         "toi_ev", "ev_shots_per60_cumulative"),
+        ("pp_shots",         "toi_pp", "pp_shots_per60_cumulative"),
+        ("ev_goals",         "toi_ev", "ev_goals_per60_cumulative"),
+        ("pp_goals",         "toi_pp", "pp_goals_per60_cumulative"),
+        ("ev_ixg",           "toi_ev", "ev_ixg_per60_cumulative"),
+        ("pp_ixg",           "toi_pp", "pp_ixg_per60_cumulative"),
+        ("ev_onice_sf",      "toi_ev", "ev_onice_sf_per60_cumulative"),
+        ("ev_onice_sa",      "toi_ev", "ev_onice_sa_per60_cumulative"),
+        ("ev_onice_gf",      "toi_ev", "ev_onice_gf_per60_cumulative"),
+        ("ev_onice_ga",      "toi_ev", "ev_onice_ga_per60_cumulative"),
+        ("hits",             "toi",    "hits_per60_cumulative"),
+        ("blocks",           "toi",    "blocks_per60_cumulative"),
+        ("ev_shot_attempts", "toi_ev", "ev_shot_attempts_per60_cumulative"),
+        ("pp_shot_attempts", "toi_pp", "pp_shot_attempts_per60_cumulative"),
+        ("indiv_missed_shots","toi",   "indiv_missed_shots_per60_cumulative"),
     ]
 
     for stat, toi_col, out_col in CUM_PAIRS:
         if stat not in df.columns or toi_col not in df.columns:
             continue
-        grp     = df.groupby(["player_id","season"])
+        grp      = df.groupby(["player_id","season"])
         cum_stat = grp[stat].transform(lambda x: x.shift(1).expanding().sum())
         cum_toi  = grp[toi_col].transform(lambda x: x.shift(1).expanding().sum())
         df[out_col] = cum_stat / (cum_toi / 60 + 1e-6)
@@ -439,6 +512,7 @@ def main():
     df = add_individual_xg(df, SHOT_XG)
     df = add_team_context(df, TEAM_GL)
     df = add_pp_career_stats(df, PLAYER_PP)
+    df = add_corsi_stats(df, PLAYER_CORSI)
     df = add_game_rates(df)
 
     print(f"\nBase dataset: {len(df):,} rows, {df.shape[1]} columns")
@@ -461,7 +535,8 @@ def main():
     print(f"  Saved:   {OUT_FILE}")
 
     base_cols    = [c for c in df.columns if not any(s in c for s in
-                    ["last5","last10","last20","last30","season_avg","career","cumulative","ewm","trend"])]
+                    ["last5","last10","last20","last30","season_avg",
+                     "career","cumulative","ewm","trend"])]
     rolling_cols = [c for c in df.columns if any(s in c for s in
                     ["last5","last10","last20","last30","season_avg"])]
     career_cols  = [c for c in df.columns if "career" in c]
@@ -480,7 +555,8 @@ def main():
         for c in ["season","date","toi_ev","toi_pp","ev_shots","ixg",
                   "ev_shots_per60_last20","pp_shots_per60_last20",
                   "regressed_ev_shooting_pct","regressed_finishing_talent",
-                  "career_games","ev_onice_sf_per60_last20","ipp_last20"]:
+                  "regressed_pp_shooting_pct","weighted_pp_share",
+                  "career_games","ev_shot_attempts_last20"]:
             if c in last.index:
                 print(f"  {c}: {last[c]}")
 

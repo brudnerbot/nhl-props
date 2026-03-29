@@ -2,14 +2,15 @@
 build_player_model.py
 
 Trains XGBoost models for player props:
-  1. toi_ev          — EV ice time (regression)
-  2. toi_pp          — PP ice time (regression)
-  3. ev_shots        — EV shots on goal (regression)
-  4. pp_shots        — PP shots on goal (regression)
-  5. ev_assists      — EV assists (regression)
-  6. pp_assists      — PP assists (regression)
-  7. scored_ev_goal  — P(scored EV goal this game) (classifier)
-  8. scored_pp_goal  — P(scored PP goal this game) (classifier)
+  1. toi_ev           — EV ice time (regression)
+  2. toi_pp           — PP ice time (regression)
+  3. ev_shots         — EV shots on goal (regression)
+  4. pp_shots         — PP shots on goal (regression)
+  5. ev_assists       — EV assists (regression)
+  6. pp_assists       — PP assists (regression)
+  7. scored_ev_goal_f — P(forward scored EV goal) (classifier, forwards only)
+
+Defense EV goals: use formula ev_shots x regressed_ev_shooting_pct x regressed_finishing_talent
 
 Train: 20152016-20242025
 Test:  20252026
@@ -24,7 +25,7 @@ import pandas as pd
 import xgboost as xgb
 from scipy.stats import pearsonr
 from sklearn.metrics import mean_absolute_error, roc_auc_score, log_loss
-from sklearn.calibration import CalibratedClassifierCV
+from sklearn.isotonic import IsotonicRegression
 
 warnings.filterwarnings("ignore")
 
@@ -49,6 +50,12 @@ EXCLUDE = {
     "ixg","ev_ixg","pp_ixg","sh_ixg",
     "ev_goals_per60","pp_goals_per60",
     "scored_ev_goal","scored_pp_goal",
+    # Same-game Corsi (leakage)
+    "ev_missed_shots","pp_missed_shots","sh_missed_shots",
+    "ev_shots_blocked_by_opp","pp_shots_blocked_by_opp","sh_shots_blocked_by_opp",
+    "ev_shot_attempts","pp_shot_attempts","sh_shot_attempts",
+    "indiv_shot_attempts","indiv_missed_shots","indiv_shots_blocked",
+    "ev_shot_attempts_per60","pp_shot_attempts_per60","indiv_shot_attempts_per60",
     # Same-game point totals (leakage)
     "pp_points","sh_points",
     # Same-game derived rates (leakage)
@@ -64,33 +71,39 @@ EXCLUDE = {
     "ev_toi_share","pp_toi_share","ev_cf_pct","ipp",
     "hits","blocks","faceoffs_won","faceoffs_taken","giveaways","takeaways",
     "team_ev_toi","team_pp_toi","team_sh_toi","team_ev_sog","team_pp_sog",
-    "pp_shots_api", "pp_goals_api", "pp_toi_sec_api",
+    # Raw API season totals (same-season leakage)
+    "pp_shots_api","pp_goals_api","pp_toi_sec_api",
+    "total_shot_attempts","missed_shots","shots_blocked","games_played",
 }
 
+# (model_name, target_col, model_type, unit, position_filter)
 TARGETS = [
-    ("toi_ev",         "regression", "min"),
-    ("toi_pp",         "regression", "min"),
-    ("ev_shots",       "regression", "shots"),
-    ("pp_shots",       "regression", "shots"),
-    ("ev_assists",     "regression", "assists"),
-    ("pp_assists",     "regression", "assists"),
-    ("scored_ev_goal", "classifier", "prob"),
+    ("toi_ev",           "toi_ev",         "regression", "min",    None),
+    ("toi_pp",           "toi_pp",         "regression", "min",    None),
+    ("ev_shots",         "ev_shots",       "regression", "shots",  None),
+    ("pp_shots",         "pp_shots",       "regression", "shots",  None),
+    ("ev_assists",       "ev_assists",     "regression", "assists",None),
+    ("pp_assists",       "pp_assists",     "regression", "assists",None),
+    ("scored_ev_goal_f", "scored_ev_goal", "classifier", "prob",   "F"),
 ]
 
 
-def get_features(df, exclude_set):
+def get_features(df, exclude_set, extra_exclude=None):
+    excl = exclude_set.copy()
+    if extra_exclude:
+        excl |= set(extra_exclude)
     return [c for c in df.columns
-            if c not in exclude_set
+            if c not in excl
             and df[c].dtype in [np.float64, np.int64, float, int]
             and not c.startswith("Unnamed")
             and not c.endswith("_x")
             and not c.endswith("_y")]
 
 
-def prepare(df, feature_cols, target):
-    valid = df[feature_cols + [target]].dropna(subset=[target])
+def prepare(df, feature_cols, target_col):
+    valid = df[feature_cols + [target_col]].dropna(subset=[target_col])
     X = valid[feature_cols].fillna(0)
-    y = valid[target]
+    y = valid[target_col]
     return X, y
 
 
@@ -138,9 +151,8 @@ def train_model(X_tr, y_tr, X_val, y_val, model_type):
 
 def evaluate(y_true, y_pred, unit, model_type):
     if model_type == "classifier":
-        # Guard against all-zero test set
         if len(np.unique(y_true)) < 2:
-            print(f"  WARNING: test set has only one class, skipping metrics")
+            print("  WARNING: test set has only one class")
             return 0.0
         auc  = roc_auc_score(y_true, y_pred)
         ll   = log_loss(y_true, y_pred, labels=[0, 1])
@@ -168,7 +180,6 @@ def main():
     print("Loading player features...")
     df = pd.read_csv(DATA_FILE, low_memory=False)
     df["date"] = pd.to_datetime(df["date"])
-
     df["is_defense"] = (df["position"] == "D").astype(int)
     df["is_forward"] = (df["position"] != "D").astype(int)
     df["is_center"]  = (df["position"] == "C").astype(int)
@@ -178,8 +189,8 @@ def main():
     test_df  = df[(df["season"] == TEST_SEASON) & (df["position"] != "G")].copy()
     print(f"Train skaters: {len(train_df):,} | Test skaters: {len(test_df):,}")
 
-    feature_cols = get_features(df, EXCLUDE)
-    print(f"Candidate features: {len(feature_cols)}")
+    feature_cols_all = get_features(df, EXCLUDE)
+    print(f"Candidate features: {len(feature_cols_all)}")
 
     all_models      = {}
     all_features    = {}
@@ -191,27 +202,43 @@ def main():
     print("TRAINING PLAYER MODELS")
     print("="*60)
 
-    for target, model_type, unit in TARGETS:
-        print(f"\n--- {target} ({model_type}) ---")
+    for model_name, target_col, model_type, unit, pos_filter in TARGETS:
+        print(f"\n--- {model_name} ({model_type}) ---")
 
-        if target not in df.columns:
-            print(f"  WARNING: {target} not found, skipping")
+        if target_col not in df.columns:
+            print(f"  WARNING: {target_col} not found, skipping")
             continue
 
-        X_train_full, y_train = prepare(train_df, feature_cols, target)
-        X_test_full,  y_test  = prepare(test_df,  feature_cols, target)
+        # Apply position filter
+        if pos_filter == "F":
+            tr = train_df[train_df["is_forward"] == 1].copy()
+            te = test_df[test_df["is_forward"]  == 1].copy()
+            feature_cols = get_features(df, EXCLUDE,
+                                         extra_exclude=["is_defense","is_forward","is_center"])
+        elif pos_filter == "D":
+            tr = train_df[train_df["is_defense"] == 1].copy()
+            te = test_df[test_df["is_defense"]  == 1].copy()
+            feature_cols = get_features(df, EXCLUDE,
+                                         extra_exclude=["is_defense","is_forward","is_center"])
+        else:
+            tr = train_df
+            te = test_df
+            feature_cols = feature_cols_all
 
-        # Filter by minimum TOI
-        if target in ("ev_shots", "ev_assists", "scored_ev_goal"):
-            mask_tr = train_df.loc[X_train_full.index, "toi_ev"] > 2
-            mask_te = test_df.loc[X_test_full.index,  "toi_ev"] > 2
+        X_train_full, y_train = prepare(tr, feature_cols, target_col)
+        X_test_full,  y_test  = prepare(te, feature_cols, target_col)
+
+        # TOI filters
+        if target_col in ("ev_shots", "ev_assists", "scored_ev_goal"):
+            mask_tr = tr.loc[X_train_full.index, "toi_ev"] > 2
+            mask_te = te.loc[X_test_full.index,  "toi_ev"] > 2
             X_train_full = X_train_full[mask_tr]
             y_train      = y_train[mask_tr]
             X_test_full  = X_test_full[mask_te]
             y_test       = y_test[mask_te]
-        elif target in ("pp_shots", "pp_assists"):
-            mask_tr = train_df.loc[X_train_full.index, "toi_pp_season_avg"].fillna(0) > 0.1
-            mask_te = test_df.loc[X_test_full.index,  "toi_pp_season_avg"].fillna(0) > 0.1
+        elif target_col in ("pp_shots", "pp_assists"):
+            mask_tr = tr.loc[X_train_full.index, "toi_pp_season_avg"].fillna(0) > 0.1
+            mask_te = te.loc[X_test_full.index,  "toi_pp_season_avg"].fillna(0) > 0.1
             X_train_full = X_train_full[mask_tr]
             y_train      = y_train[mask_tr]
             X_test_full  = X_test_full[mask_te]
@@ -234,38 +261,34 @@ def main():
         print("  Training...")
         model = train_model(X_t, y_t, X_v, y_v, model_type)
 
-        # Calibrate classifier probabilities using validation set
         if model_type == "classifier":
-            from sklearn.isotonic import IsotonicRegression
-            raw_val_probs = model.predict_proba(X_v)[:, 1]
+            raw_probs = model.predict_proba(X_v)[:, 1]
             iso = IsotonicRegression(out_of_bounds="clip")
-            iso.fit(raw_val_probs, y_v)
-            all_calibrators[target] = iso
+            iso.fit(raw_probs, y_v)
+            all_calibrators[model_name] = iso
             y_pred = iso.transform(model.predict_proba(X_te)[:, 1])
         else:
             y_pred = model.predict(X_te)
 
         result = evaluate(y_test.values, y_pred, unit, model_type)
 
-        residual_std = float(np.std(y_test.values - y_pred))
-        all_stds[target] = residual_std
+        all_stds[model_name]     = float(np.std(y_test.values - y_pred))
+        all_models[model_name]   = model
+        all_features[model_name] = top_feats
+        results[model_name]      = {"result": result, "unit": unit, "type": model_type}
 
         print(f"  Top 10 features:")
         fi = pd.Series(model.feature_importances_, index=top_feats).sort_values(ascending=False)
         for f, v in fi.head(10).items():
             print(f"    {f:<45} {v:.4f}")
 
-        all_models[target]   = model
-        all_features[target] = top_feats
-        results[target]      = {"result": result, "unit": unit, "type": model_type}
-
-    # Save all models
+    # Save
     print("\n" + "="*60)
     print("SAVING MODELS")
     print("="*60)
 
-    for target, model in all_models.items():
-        path = MODEL_DIR / f"{target}.json"
+    for model_name, model in all_models.items():
+        path = MODEL_DIR / f"{model_name}.json"
         model.save_model(str(path))
         print(f"  Saved: {path.name}")
 
@@ -274,22 +297,19 @@ def main():
     with open(MODEL_DIR / "residual_stds.pkl", "wb") as f:
         pickle.dump(all_stds, f)
     with open(MODEL_DIR / "model_types.pkl", "wb") as f:
-        pickle.dump({t: mt for t, mt, _ in TARGETS}, f)
-    print("  Saved: feature_lists.pkl, residual_stds.pkl, model_types.pkl")
-
-    if all_calibrators:
-        with open(MODEL_DIR / "calibrators.pkl", "wb") as f:
-            pickle.dump(all_calibrators, f)
-        print("  Saved: calibrators.pkl")
+        pickle.dump({n: mt for n, _, mt, _, _ in TARGETS}, f)
+    with open(MODEL_DIR / "calibrators.pkl", "wb") as f:
+        pickle.dump(all_calibrators, f)
+    print("  Saved: feature_lists.pkl, residual_stds.pkl, model_types.pkl, calibrators.pkl")
 
     print("\n" + "="*60)
     print("SUMMARY")
     print("="*60)
-    for target, res in results.items():
+    for model_name, res in results.items():
         if res["type"] == "classifier":
-            print(f"  {target:<22} AUC: {res['result']:.4f}")
+            print(f"  {model_name:<25} AUC: {res['result']:.4f}")
         else:
-            print(f"  {target:<22} MAE: {res['result']:.3f} {res['unit']}")
+            print(f"  {model_name:<25} MAE: {res['result']:.3f} {res['unit']}")
 
 
 if __name__ == "__main__":
