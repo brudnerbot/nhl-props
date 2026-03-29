@@ -475,6 +475,87 @@ def add_rolling_features(df):
     ).fillna(LEAGUE_FINISHING)
     df = df.drop(columns=["career_ev_ixg_xg","career_ev_goals_xg"])
 
+    # Career home vs away shot tendency
+    # home_shot_ratio > 1.0 means player shoots more at home
+    # Regressed toward 1.0 (no home advantage) with 50-game prior
+    print("  Computing home/away shot tendency...")
+    df = df.sort_values(["player_id","date"]).reset_index(drop=True)
+
+    career_home_shots = df[df["is_home"]==1].groupby("player_id")["ev_shots"].transform(
+        lambda x: x.shift(1).expanding().mean()
+    )
+    career_away_shots = df[df["is_home"]==0].groupby("player_id")["ev_shots"].transform(
+        lambda x: x.shift(1).expanding().mean()
+    )
+
+    # Fill forward so away rows have the home career avg and vice versa
+    df["_career_home_shots"] = career_home_shots
+    df["_career_away_shots"] = career_away_shots
+    df["_career_home_shots"] = df.groupby("player_id")["_career_home_shots"].ffill().bfill()
+    df["_career_away_shots"] = df.groupby("player_id")["_career_away_shots"].ffill().bfill()
+
+    # Home shot ratio: how much more does this player shoot at home vs away?
+    df["career_home_shot_ratio"] = (
+        df["_career_home_shots"] / (df["_career_away_shots"] + 1e-6)
+    ).clip(0.5, 2.0)
+
+    # Regress toward 1.0 (no home advantage) based on games played each side
+    career_home_games = (df["is_home"]==1).groupby(df["player_id"]).transform(
+        lambda x: x.shift(1).expanding().sum()
+    ).fillna(0)
+    career_away_games = (df["is_home"]==0).groupby(df["player_id"]).transform(
+        lambda x: x.shift(1).expanding().sum()
+    ).fillna(0)
+    min_games = career_home_games.clip(upper=career_away_games)
+    # Full trust at 50+ games each side
+    trust_weight = (min_games / 50.0).clip(0, 1)
+    df["regressed_home_shot_ratio"] = (
+        trust_weight * df["career_home_shot_ratio"] + (1 - trust_weight) * 1.0
+    ).fillna(1.0)
+
+    df = df.drop(columns=["_career_home_shots","_career_away_shots"], errors="ignore")
+
+    # Career home vs away goal tendency
+    career_home_goals = df[df["is_home"]==1].groupby("player_id")["ev_goals"].transform(
+        lambda x: x.shift(1).expanding().mean()
+    )
+    career_away_goals = df[df["is_home"]==0].groupby("player_id")["ev_goals"].transform(
+        lambda x: x.shift(1).expanding().mean()
+    )
+    df["_career_home_goals"] = career_home_goals
+    df["_career_away_goals"] = career_away_goals
+    df["_career_home_goals"] = df.groupby("player_id")["_career_home_goals"].ffill().bfill()
+    df["_career_away_goals"] = df.groupby("player_id")["_career_away_goals"].ffill().bfill()
+    df["career_home_goal_ratio"] = (
+        df["_career_home_goals"] / (df["_career_away_goals"] + 1e-6)
+    ).clip(0.3, 3.0)
+    # Need more games to trust goal splits (rarer events) — 100 game prior each side
+    min_goal_games = career_home_games.clip(upper=career_away_games)
+    goal_trust_weight = (min_goal_games / 100.0).clip(0, 1)
+    df["regressed_home_goal_ratio"] = (
+        goal_trust_weight * df["career_home_goal_ratio"] + (1 - goal_trust_weight) * 1.0
+    ).fillna(1.0)
+    df = df.drop(columns=["_career_home_goals","_career_away_goals"], errors="ignore")
+
+    # Career home vs away assist tendency
+    career_home_assists = df[df["is_home"]==1].groupby("player_id")["ev_assists"].transform(
+        lambda x: x.shift(1).expanding().mean()
+    )
+    career_away_assists = df[df["is_home"]==0].groupby("player_id")["ev_assists"].transform(
+        lambda x: x.shift(1).expanding().mean()
+    )
+    df["_career_home_assists"] = career_home_assists
+    df["_career_away_assists"] = career_away_assists
+    df["_career_home_assists"] = df.groupby("player_id")["_career_home_assists"].ffill().bfill()
+    df["_career_away_assists"] = df.groupby("player_id")["_career_away_assists"].ffill().bfill()
+    df["career_home_assist_ratio"] = (
+        df["_career_home_assists"] / (df["_career_away_assists"] + 1e-6)
+    ).clip(0.5, 2.0)
+    df["regressed_home_assist_ratio"] = (
+        trust_weight * df["career_home_assist_ratio"] + (1 - trust_weight) * 1.0
+    ).fillna(1.0)
+    df = df.drop(columns=["_career_home_assists","_career_away_assists"], errors="ignore")
+
     # Weighted PP TOI share across past seasons (EWM, recent weighted more)
     print("  Computing weighted PP TOI share...")
     season_pp = df.groupby(["player_id","season"]).agg(
@@ -494,6 +575,11 @@ def add_rolling_features(df):
         season_pp[["player_id","season","weighted_pp_share"]],
         on=["player_id","season"], how="left"
     )
+    # Home tendency interaction features
+    # These directly encode: "is this player at home AND do they benefit from home?"
+    df["home_shot_boost"]   = df["is_home"] * (df["regressed_home_shot_ratio"] - 1.0)
+    df["home_goal_boost"]   = df["is_home"] * (df["regressed_home_goal_ratio"] - 1.0)
+    df["home_assist_boost"] = df["is_home"] * (df["regressed_home_assist_ratio"] - 1.0)
 
     print(f"  Rolling features computed: {len(df):,} rows")
     return df
