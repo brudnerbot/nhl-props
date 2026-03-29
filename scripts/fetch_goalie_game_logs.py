@@ -4,8 +4,8 @@ import time
 import os
 
 # --- CONFIG ---
-SEASONS = ["20192020", "20202021", "20212022", "20222023", "20232024", "20242025", "20252026"]
-OUTPUT_DIR = os.path.expanduser("~/nhl-props/data/raw/goalie_logs")
+SEASONS = ["20152016", "20162017", "20172018", "20182019", "20192020", "20202021", "20212022", "20222023", "20232024", "20242025", "20252026"]
+OUTPUT_DIR = os.path.expanduser("~/nhl-props/data/raw/goalie_game_logs")
 BASE_URL = "https://api-web.nhle.com/v1"
 
 TEAMS = [
@@ -80,6 +80,7 @@ def parse_goalie_game_log(game_log, player_id, goalie_info, season):
             "goals": game.get("goals", 0),
             "assists": game.get("assists", 0),
             "pim": game.get("pim", 0),
+            "ot_loss": 1 if game.get("decision") == "O" else 0,
         }
         rows.append(row)
     return rows
@@ -89,7 +90,7 @@ def main(test_mode=False):
     print("Step 1: Building goalie list...")
     goalie_dict = {}  # player_id -> goalie_info
 
-    seasons_for_roster = ["20232024", "20242025", "20252026"] if not test_mode else ["20232024"]
+    seasons_for_roster = SEASONS if not test_mode else ["20232024"]
     teams_for_roster = TEAMS if not test_mode else ["EDM", "TOR", "BOS"]
 
     for season in seasons_for_roster:
@@ -134,6 +135,7 @@ def main(test_mode=False):
         print("\n--- TEST OUTPUT ---")
         print(df[["first_name", "last_name", "season", "date", "team", "decision", "shots_against", "goals_against", "saves", "save_pct", "toi"]].to_string())
     else:
+        os.makedirs(OUTPUT_DIR, exist_ok=True)
         output_path = os.path.join(OUTPUT_DIR, "goalie_game_logs.csv")
         df.to_csv(output_path, index=False)
         print(f"\nDone! {len(df)} rows saved to {output_path}")
