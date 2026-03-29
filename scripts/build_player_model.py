@@ -74,6 +74,7 @@ EXCLUDE = {
     # Raw API season totals (same-season leakage)
     "pp_shots_api","pp_goals_api","pp_toi_sec_api",
     "total_shot_attempts","missed_shots","shots_blocked","games_played",
+    "team_pp_toi", "team_ev_toi", "team_sh_toi", "team_ev_sog", "team_pp_sog",
 }
 
 # (model_name, target_col, model_type, unit, position_filter)

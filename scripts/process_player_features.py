@@ -183,12 +183,43 @@ def add_individual_xg(df, shot_path):
 def add_team_context(df, team_gl_path):
     print("Adding team context...")
     tgl = pd.read_csv(team_gl_path, low_memory=False)
+    tgl["date"] = pd.to_datetime(tgl["date"])
+    tgl = tgl.sort_values(["team","date"])
+
+    # Team's own PP/EV/SH TOI (already there)
     team_toi = tgl[["game_id","team","ev_toi","pp_toi","sh_toi",
                      "ev_shots_on_goal_for","pp_shots_on_goal_for"]].copy()
     team_toi.columns = ["game_id","team","team_ev_toi","team_pp_toi",
                          "team_sh_toi","team_ev_sog","team_pp_sog"]
     df = df.merge(team_toi, on=["game_id","team"], how="left")
+
+    # Opponent defensive rolling stats (L30)
+    # These represent: how many shots/attempts does this opponent ALLOW per game
+    opp_def_cols = [
+        "ev_shots_on_goal_against",   # shots they allow at EV
+        "ev_shot_attempts_against",   # Corsi they allow at EV
+        "ev_blocked_shots_for",       # shots they block (shot suppression skill)
+        "ev_goals_against",           # EV goals they allow
+        "ev_shots_on_goal_for",       # their own EV shot volume (pace proxy)
+    ]
+
+    opp_rolling = tgl[["game_id","team"] + opp_def_cols].copy()
+
+    # Compute L30 rolling averages per team (shift=1 to avoid leakage)
+    for col in opp_def_cols:
+        opp_rolling[f"opp_{col}_last30"] = (
+            tgl.groupby("team")[col]
+            .transform(lambda x: x.shift(1).rolling(30, min_periods=8).mean())
+        )
+
+    # Rename team → opponent so we can join on opponent
+    opp_rolling = opp_rolling[["game_id","team"] +
+                               [f"opp_{c}_last30" for c in opp_def_cols]].copy()
+    opp_rolling = opp_rolling.rename(columns={"team":"opponent"})
+
+    df = df.merge(opp_rolling, on=["game_id","opponent"], how="left")
     print(f"  Team context added: {df['team_ev_toi'].notna().sum():,} rows")
+    print(f"  Opponent context added: {df['opp_ev_shots_on_goal_against_last30'].notna().sum():,} rows")
     return df
 
 
