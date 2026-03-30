@@ -66,8 +66,17 @@ def classify_strength(code: str, is_home: bool) -> str:
     if decoded is None:
         return "ev"
     hg, hs, as_, ag, is_en = decoded
+
     if is_en:
-        return "en"
+        # Empty net — classify by skater differential (ignore missing goalie)
+        # 6v5 = EV, 6v4 = PP for team with extra skater, 5v6 = SH
+        if hs == as_:
+            return "ev"
+        if is_home:
+            return "pp" if hs > as_ else "sh"
+        else:
+            return "pp" if as_ > hs else "sh"
+
     if hs == as_:
         return "ev"
     if is_home:
