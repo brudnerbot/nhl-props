@@ -6,12 +6,16 @@ Generates player prop predictions for a given game using:
   - Player features from data/processed/player_features.csv
   - Trained models from models/player/
   - Team PP baselines computed on-the-fly from recent PBP data
+  - Opponent goalie GSAx adjustment in goal formula
 
 PP TOI uses formula: team_pp_toi × player_pp_share
   PP share priority:
   1. Lineup PP unit assignment (primary) → team PP1/PP2 baseline
   2. Recent games (last 10 with PP time) → nudge from baseline
   3. Season history → small additional nudge
+
+Goals formula: ev_shots × regressed_ev_sh% × finishing_talent × goalie_adj
+  goalie_adj = 1 - (opp_goalie_gsax_last20 / avg_shots_faced)
 
 Usage:
     python scripts/predict_player_props.py TOR VAN
@@ -37,11 +41,13 @@ ROOT      = Path(__file__).resolve().parents[1]
 DATA_DIR  = ROOT / "data"
 MODEL_DIR = ROOT / "models/player"
 
-PLAYER_FEATURES = DATA_DIR / "processed/player_features.csv"
-LINEUP_DIR      = DATA_DIR / "raw/lineups"
-PP_SHARES_FILE  = DATA_DIR / "raw/player_pp_shares.csv"
-PBP_FILE        = DATA_DIR / "raw/player_pbp_stats/player_pbp_stats.csv"
-TEAM_LOGS_FILE  = DATA_DIR / "raw/team_game_logs/team_game_logs.csv"
+PLAYER_FEATURES  = DATA_DIR / "processed/player_features.csv"
+LINEUP_DIR       = DATA_DIR / "raw/lineups"
+PP_SHARES_FILE   = DATA_DIR / "raw/player_pp_shares.csv"
+PBP_FILE         = DATA_DIR / "raw/player_pbp_stats/player_pbp_stats.csv"
+TEAM_LOGS_FILE   = DATA_DIR / "raw/team_game_logs/team_game_logs.csv"
+GOALIE_FEAT_FILE = DATA_DIR / "processed/goalie_features.csv"
+GOALIE_LOGS_FILE = DATA_DIR / "raw/goalie_game_logs/goalie_game_logs.csv"
 
 SHOT_LINES  = [0.5, 1.5, 2.5, 3.5, 4.5, 5.5, 6.5]
 POINT_LINES = [0.5, 1.5, 2.5]
@@ -93,6 +99,52 @@ def load_models():
     return models, feature_lists, model_types, calibrators, residual_stds
 
 
+# ── Goalie loading ────────────────────────────────────────────────────────────
+def load_goalie_features():
+    """Load goalie features, add names, compute league avg shots faced."""
+    gf = pd.read_csv(GOALIE_FEAT_FILE, low_memory=False)
+    gf["date"] = pd.to_datetime(gf["date"])
+    gf = gf[gf["toi"] > 30].sort_values("date")
+
+    # Add goalie names from raw logs
+    raw = pd.read_csv(
+        GOALIE_LOGS_FILE,
+        usecols=["player_id", "first_name", "last_name"],
+        low_memory=False
+    ).drop_duplicates("player_id")
+    gf = gf.merge(raw, on="player_id", how="left")
+
+    # League average shots faced per game by starters (20222023+, where xG exists)
+    recent = gf[gf["season"] >= 20222023]
+    avg_shots_faced = float(recent["shots_against"].mean())
+    print(f"  League avg shots faced by starters: {avg_shots_faced:.1f}")
+
+    return gf, avg_shots_faced
+
+
+def get_goalie_gsax(goalie_df, team):
+    """
+    Get most recent starting goalie's GSAx dict for a team.
+    Returns a plain dict — never a Series.
+    """
+    team_gf = goalie_df[goalie_df["team"] == team]
+    if len(team_gf) == 0:
+        return {"gsax_last20": 0.0, "gsax_last30": 0.0,
+                "regressed_gsax": 0.0, "name": "Unknown"}
+    latest = team_gf.iloc[-1]
+    return {
+        "gsax_last20":    float(latest["gsax_last20"])
+                          if pd.notna(latest["gsax_last20"]) else 0.0,
+        "gsax_last30":    float(latest["gsax_last30"])
+                          if pd.notna(latest["gsax_last30"]) else 0.0,
+        "regressed_gsax": float(latest["regressed_gsax_per_game"])
+                          if pd.notna(latest["regressed_gsax_per_game"]) else 0.0,
+        "name":           str(latest["last_name"])
+                          if "last_name" in latest.index and pd.notna(latest["last_name"])
+                          else "Unknown",
+    }
+
+
 # ── PP data loading and computation ──────────────────────────────────────────
 def load_pp_shares():
     """Season-level PP share per player per team per season."""
@@ -119,7 +171,7 @@ def compute_team_pp_baselines(pbp_path, team_logs_path, last_n_games=20):
     tgl = pd.read_csv(team_logs_path, low_memory=False)
     tgl["date"] = pd.to_datetime(tgl["date"])
 
-    team_pp  = tgl[["game_id","team","pp_toi","date"]].rename(
+    team_pp = tgl[["game_id","team","pp_toi","date"]].rename(
         columns={"pp_toi":"team_pp_toi"})
     df = pbp.merge(team_pp, on=["game_id","team"], how="left")
     df = df[df["team_pp_toi"] > 1.0]
@@ -181,8 +233,6 @@ def compute_recent_player_pp_shares(pbp_path, team_logs_path, last_n_games=10):
     game_dates = tgl[["game_id","date"]].drop_duplicates().set_index("game_id")["date"]
     df["date"] = df["game_id"].map(game_dates)
     df["pp_share"] = df["toi_pp"] / (df["team_pp_toi"] + 1e-6)
-
-    # Only games where player had meaningful PP time
     df = df[df["toi_pp"] > 0.3]
 
     recent_shares = {}
@@ -203,33 +253,27 @@ def get_pp_share(player_id, team, pp_unit, feature_row,
                  pp_shares, team_pp_baselines, recent_shares):
     """
     Get player's expected PP TOI share of team PP time.
-
-    Logic (lineup role is primary):
-    1. Start with team's PP1 or PP2 baseline (from lineup assignment)
-    2. Nudge based on recent games (last 10 with PP time) — moderate weight
-    3. Nudge based on season history — small weight, only if same role
+    1. Start with team's PP1/PP2 baseline (lineup assignment = primary)
+    2. Nudge with recent game share (last 10 PP games, max 30% weight)
+    3. Nudge with season history (only if same role, max 20% weight)
     """
     if pp_unit == 0:
         return PP_SHARE_FALLBACK[0]
 
-    # Step 1: team baseline for this unit (primary signal from lineup)
     team_bl       = team_pp_baselines.get(str(team), {})
     team_baseline = team_bl.get(
         "pp1_usage" if pp_unit == 1 else "pp2_usage",
         PP_SHARE_FALLBACK[pp_unit]
     )
-
-    # Start from team baseline
     share = team_baseline
 
-    # Step 2: recent games nudge (last 10 games with PP time)
+    # Recent nudge
     recent = recent_shares.get(int(player_id))
     if recent and recent["games"] >= 3:
-        # Weight recent more as sample grows, max 30% adjustment
         recent_weight = min(recent["games"] / 10.0, 1.0) * 0.30
         share = (1 - recent_weight) * share + recent_weight * recent["avg_share"]
 
-    # Step 3: season history nudge (only if same role, small weight)
+    # Season history nudge (same role only)
     try:
         current_season = int(feature_row.get("season", 20252026))
     except (TypeError, ValueError):
@@ -241,11 +285,8 @@ def get_pp_share(player_id, team, pp_unit, feature_row,
             pp_shares.get((int(player_id), str(team), prev_season)))
 
     if hist and int(hist["pp_unit_est"]) == pp_unit:
-        hist_games  = float(hist["games_with_pp"])
-        hist_share  = float(hist["avg_share"])
-        # Max 20% weight from history, only when same role
-        hist_weight = min(hist_games / 30.0, 1.0) * 0.20
-        share = (1 - hist_weight) * share + hist_weight * hist_share
+        hist_weight = min(float(hist["games_with_pp"]) / 30.0, 1.0) * 0.20
+        share = (1 - hist_weight) * share + hist_weight * float(hist["avg_share"])
 
     return float(share)
 
@@ -452,7 +493,6 @@ def predict_player(feature_row, player_info, models, feature_lists,
     pp_share = get_pp_share(player_id, team, pp_unit, feature_row,
                             pp_shares, team_pp_baselines, recent_shares)
 
-    # Team PP TOI — use last20 rolling average (most recent)
     team_pp_toi = (
         feature_row.get("team_pp_toi_last20") or
         feature_row.get("team_pp_toi_last10") or
@@ -470,7 +510,12 @@ def predict_player(feature_row, player_info, models, feature_lists,
     return preds
 
 
-def compute_goals(preds, feature_row):
+def compute_goals(preds, feature_row, opp_goalie, avg_shots_faced):
+    """
+    Compute goal predictions using shooting% formula with goalie adjustment.
+    opp_goalie: dict from get_goalie_gsax() — never a Series
+    avg_shots_faced: float computed from goalie data at startup
+    """
     ev_shots = max(preds.get("ev_shots", 0), 0)
     pp_shots = max(preds.get("pp_shots", 0), 0)
     toi_sh   = float(feature_row.get("toi_sh_last20", 0) or 0)
@@ -481,8 +526,14 @@ def compute_goals(preds, feature_row):
     finishing = float(feature_row.get("regressed_finishing_talent", 1.097) or 1.097)
     pp_sh_pct = float(feature_row.get("regressed_pp_shooting_pct", 0.144) or 0.144)
 
-    ev_goals_lambda    = ev_shots * ev_sh_pct * finishing
-    pp_goals_lambda    = pp_shots * pp_sh_pct
+    # Goalie adjustment: goalie saving +1 GSAx/game on avg_shots_faced shots
+    # means ~(1/avg_shots_faced) fewer goals per shot = proportionally fewer goals
+    gsax          = float(opp_goalie.get("gsax_last20", 0) or 0)
+    goalie_adj    = 1.0 - (gsax / avg_shots_faced)
+    goalie_adj    = max(0.70, min(1.30, goalie_adj))  # cap at ±30%
+
+    ev_goals_lambda    = ev_shots * ev_sh_pct * finishing * goalie_adj
+    pp_goals_lambda    = pp_shots * pp_sh_pct * goalie_adj
     total_goals_lambda = ev_goals_lambda + pp_goals_lambda
 
     return {
@@ -493,6 +544,7 @@ def compute_goals(preds, feature_row):
         "pp_shots":           pp_shots,
         "sh_shots":           sh_shots,
         "total_shots_lambda": ev_shots + pp_shots + sh_shots,
+        "goalie_adj":         goalie_adj,
     }
 
 
@@ -555,6 +607,10 @@ def main():
     features_df["is_home"]    = features_df["is_home"].astype(int)
     print(f"  {len(features_df):,} rows loaded")
 
+    print("Loading goalie features...")
+    goalie_df, avg_shots_faced = load_goalie_features()
+    print(f"  {len(goalie_df):,} starter game records loaded")
+
     print("Loading lineups...")
     lineups = load_lineup(date_str)
     primary, secondary, tertiary = build_name_lookup(features_df)
@@ -562,13 +618,17 @@ def main():
     team_results = {}
 
     for team, is_home in [(home_team, True), (away_team, False)]:
-        if team not in lineups:
-            print(f"  WARNING: {team} not found in lineup file")
-            continue
+        opp_team   = away_team if is_home else home_team
+        opp_goalie = get_goalie_gsax(goalie_df, opp_team)  # always a dict
+        goalie_adj = 1.0 - (opp_goalie["gsax_last20"] / avg_shots_faced)
+        goalie_adj = max(0.70, min(1.30, goalie_adj))
 
         players = extract_players_from_lineup(lineups, team, is_home)
+
         print(f"\n{'='*60}")
         print(f"  {team} ({'HOME' if is_home else 'AWAY'}) — {len(players)} players")
+        print(f"  Opp goalie: {opp_goalie['name']} ({opp_team})  "
+              f"GSAx_L20={opp_goalie['gsax_last20']:+.2f}  adj={goalie_adj:.3f}")
         print(f"{'='*60}")
 
         bl = team_pp_baselines.get(team, {})
@@ -598,7 +658,9 @@ def main():
             preds    = predict_player(feat_row, p, models, feature_lists,
                                       model_types, calibrators, pp_shares,
                                       team_pp_baselines, recent_shares)
-            computed = compute_goals(preds, feat_row)
+            computed = compute_goals(preds, feat_row,
+                                     opp_goalie=opp_goalie,
+                                     avg_shots_faced=avg_shots_faced)
             assists  = compute_assists(preds)
 
             pos_label  = p["position_group"]

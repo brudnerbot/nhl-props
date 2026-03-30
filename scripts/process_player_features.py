@@ -38,6 +38,7 @@ TEAM_GL      = DATA_DIR / "raw/team_game_logs/team_game_logs.csv"
 PLAYER_PP    = DATA_DIR / "raw/player_pp_stats.csv"
 PLAYER_CORSI = DATA_DIR / "raw/player_corsi_stats.csv"
 OUT_FILE     = DATA_DIR / "processed/player_features.csv"
+GOALIE_FEATURES = DATA_DIR / "processed/goalie_features.csv"
 
 ROLLING_WINDOWS = [5, 10, 20, 30]
 MIN_SEASON      = 20152016
@@ -619,6 +620,30 @@ def add_cumulative_rates(df):
     print("  Cumulative rates added")
     return df
 
+def add_opponent_goalie_context(df, goalie_features_path):
+    print("Adding opponent goalie context...")
+    gf = pd.read_csv(goalie_features_path, low_memory=False)
+    gf["date"] = pd.to_datetime(gf["date"])
+
+    # Keep only the primary goalie per game per team (highest TOI)
+    gf = gf.sort_values("toi", ascending=False)
+    gf = gf.drop_duplicates(subset=["game_id","team"], keep="first")
+    print(f"  Goalie records after dedup: {len(gf):,}")
+
+    goalie_cols = [
+        "game_id","team",
+        "gsax_last20","gsax_last30","gsax_season_avg","regressed_gsax_per_game",
+    ]
+    gf = gf[goalie_cols].copy()
+    gf.columns = ["game_id","opponent",
+                  "opp_goalie_gsax_last20","opp_goalie_gsax_last30",
+                  "opp_goalie_gsax_season_avg","opp_goalie_regressed_gsax"]
+
+    df = df.merge(gf, on=["game_id","opponent"], how="left")
+
+    covered = df["opp_goalie_gsax_last20"].notna().sum()
+    print(f"  Opponent goalie GSAx joined: {covered:,}/{len(df):,} rows ({covered/len(df):.1%})")
+    return df
 
 def main():
     print("="*60)
@@ -628,6 +653,7 @@ def main():
     df = load_base(PLAYER_GL, PLAYER_PBP)
     df = add_individual_xg(df, SHOT_XG)
     df = add_team_context(df, TEAM_GL)
+    df = add_opponent_goalie_context(df, DATA_DIR / "processed/goalie_features.csv")
     df = add_pp_career_stats(df, PLAYER_PP)
     df = add_corsi_stats(df, PLAYER_CORSI)
     df = add_game_rates(df)

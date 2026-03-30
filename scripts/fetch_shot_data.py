@@ -5,7 +5,7 @@ import os
 import math
 
 # --- CONFIG ---
-SEASONS = ["20222023", "20232024", "20242025", "20252026"]
+SEASONS = ["20152016", "20162017", "20172018", "20182019", "20192020", "20202021", "20212022", "20222023", "20232024", "20242025", "20252026"]
 OUTPUT_DIR = os.path.expanduser("~/nhl-props/data/raw")
 BASE_URL = "https://api-web.nhle.com/v1"
 
@@ -267,13 +267,28 @@ def main(test_mode=False):
 
     print(f"\nTotal unique games to fetch: {len(all_game_ids)}")
 
+    # Deduplicate against existing data
+    output_path = os.path.join(OUTPUT_DIR, "shot_data", "shot_data.csv")
+    existing_game_ids = set()
+    if os.path.exists(output_path):
+        existing = pd.read_csv(output_path, usecols=["game_id"])
+        existing_game_ids = set(existing["game_id"].unique())
+        print(f"Already fetched: {len(existing_game_ids):,} games")
+
+    new_game_ids = all_game_ids - existing_game_ids
+    print(f"New games to fetch: {len(new_game_ids):,}")
+    if not new_game_ids:
+        print("Nothing to fetch.")
+        return
+
     # Step 2: fetch play-by-play and parse shots
     print("\nStep 2: Fetching play-by-play and extracting shots...")
     all_rows = []
-    for i, game_id in enumerate(sorted(all_game_ids)):
+    new_game_ids_sorted = sorted(new_game_ids)
+    for i, game_id in enumerate(new_game_ids_sorted):
         try:
             if i % 100 == 0:
-                print(f"  {i}/{len(all_game_ids)} games processed...")
+                print(f"  {i}/{len(new_game_ids_sorted)} games processed...")
             data = fetch_play_by_play(game_id)
             rows = parse_shots(data)
             all_rows.extend(rows)
@@ -281,29 +296,30 @@ def main(test_mode=False):
         except Exception as e:
             print(f"  ERROR game {game_id}: {e}")
 
+        # Checkpoint every 500 games
+        if i % 500 == 499:
+            df_new = pd.DataFrame(all_rows)
+            if os.path.exists(output_path):
+                df_new = pd.concat([pd.read_csv(output_path), df_new], ignore_index=True)
+            df_new.drop_duplicates("game_id" if "game_id" not in df_new.columns else None)
+            df_new = df_new.sort_values(["game_id","period","time_seconds"]).reset_index(drop=True)
+            df_new.to_csv(output_path, index=False)
+            print(f"    Checkpoint: {len(df_new):,} total shots saved")
+            all_rows = []
+
     # Step 3: save
-    df = pd.DataFrame(all_rows)
-    df = df.sort_values(["game_id", "period", "time_seconds"]).reset_index(drop=True)
-
-    if test_mode:
-        print("\n--- TEST OUTPUT ---")
-        print(f"Total shots: {len(df)}")
-        print()
-        print(df[["date", "shooting_team", "event_type", "shot_type",
-                   "distance", "angle", "is_goal", "is_rebound",
-                   "strength", "prev_event_type"]].head(20).to_string())
-        print()
-        print("Goals only:")
-        print(df[df["is_goal"] == 1][["shooting_team", "shot_type",
-                                       "distance", "angle", "is_rebound",
-                                       "strength"]].head(10).to_string())
-    else:
-        output_path = os.path.join(OUTPUT_DIR, "shot_data", "shot_data.csv")
+    if all_rows:
+        df_new = pd.DataFrame(all_rows)
         os.makedirs(os.path.dirname(output_path), exist_ok=True)
-        df.to_csv(output_path, index=False)
-        print(f"\nDone! {len(df)} shots saved to {output_path}")
+        if os.path.exists(output_path):
+            df_new = pd.concat([pd.read_csv(output_path), df_new], ignore_index=True)
+        df_new = df_new.sort_values(["game_id","period","time_seconds"]).reset_index(drop=True)
+        df_new.to_csv(output_path, index=False)
 
-
+    final = pd.read_csv(output_path, usecols=["game_id","season"])
+    print(f"\nDone! {len(final):,} shots saved to {output_path}")
+    print(f"Seasons: {sorted(final['season'].unique())}")
+    
 if __name__ == "__main__":
     import sys
     test = "--test" in sys.argv
