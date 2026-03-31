@@ -228,9 +228,14 @@ def process_game(game_id: int, season: int, date: str,
         if end <= start: continue
         is_home = roster.get(pid, {}).get("is_home", True)
         for t in range(start, end):
-            s = classify_strength(time_sit.get(t, "1551"), is_home)
+            sit_code = time_sit.get(t, "1551")
+            s = classify_strength(sit_code, is_home)
             player_toi[pid][s]       += 1 / 60.0
             player_toi[pid]["total"] += 1 / 60.0
+            # Also track EN time separately regardless of strength classification
+            decoded = decode_situation(sit_code)
+            if decoded and decoded[4]:  # is_en = decoded[4]
+                player_toi[pid]["en"] += 1 / 60.0
 
     # --- Individual + on-ice stats ---
     player_stats = defaultdict(lambda: {
@@ -269,11 +274,9 @@ def process_game(game_id: int, season: int, date: str,
         hg, hs, as_, ag, is_en = decoded
 
         def get_strength(pid):
-            if is_en: return "en"
-            if hs == as_: return "ev"
+            # Use classify_strength for consistency with TOI classification
             ih = roster.get(pid, {}).get("is_home", True)
-            if ih: return "pp" if hs > as_ else "sh"
-            else:  return "pp" if as_ > hs else "sh"
+            return classify_strength(sit, ih)
 
         if etype in ("shot-on-goal", "goal"):
             shooter = det.get("shootingPlayerId") or det.get("scoringPlayerId")
