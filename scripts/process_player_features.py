@@ -40,7 +40,7 @@ PLAYER_CORSI = DATA_DIR / "raw/player_corsi_stats.csv"
 OUT_FILE     = DATA_DIR / "processed/player_features.csv"
 GOALIE_FEATURES = DATA_DIR / "processed/goalie_features.csv"
 
-ROLLING_WINDOWS = [5, 10, 20, 30]
+ROLLING_WINDOWS = [5, 10, 15, 20, 30]
 MIN_SEASON      = 20152016
 
 ROLL_STATS = [

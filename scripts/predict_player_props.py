@@ -8,18 +8,16 @@ Generates player prop predictions for a given game using:
   - Team PP baselines computed on-the-fly from recent PBP data
   - Opponent goalie GSAx adjustment in goal formula
 
-PP TOI uses formula: team_pp_toi × player_pp_share
-  PP share priority:
-  1. Lineup PP unit assignment (primary) → team PP1/PP2 baseline
-  2. Recent games (last 10 with PP time) → nudge from baseline
-  3. Season history → small additional nudge
-
-Goals formula: ev_shots × regressed_ev_sh% × finishing_talent × goalie_adj
-  goalie_adj = 1 - (opp_goalie_gsax_last20 / avg_shots_faced)
+PP TOI:   formula — team_pp_toi × player_pp_share
+EV shots: formula — rate_last10 × pred_toi_ev (60% recent, 40% season)
+PP shots: formula — rate_last10 × pred_toi_pp (50% recent, 50% season)
+Goals:    formula — shots × regressed_sh% × finishing × goalie_adj
+Assists:  XGBoost models (ev_assists, pp_assists)
+Goals classifier: scored_ev_goal_f (forwards only, calibrated)
 
 Usage:
-    python scripts/predict_player_props.py TOR VAN
-    python scripts/predict_player_props.py TOR VAN --date 2026-03-28
+    python scripts/predict_player_props.py ANA TOR
+    python scripts/predict_player_props.py ANA TOR --date 2026-03-30
 """
 
 import argparse
@@ -34,6 +32,7 @@ import numpy as np
 import pandas as pd
 import xgboost as xgb
 from scipy.stats import poisson
+from scipy.stats import nbinom
 
 warnings.filterwarnings("ignore")
 
@@ -52,7 +51,6 @@ GOALIE_LOGS_FILE = DATA_DIR / "raw/goalie_game_logs/goalie_game_logs.csv"
 SHOT_LINES  = [0.5, 1.5, 2.5, 3.5, 4.5, 5.5, 6.5]
 POINT_LINES = [0.5, 1.5, 2.5]
 
-# League average fallback PP share by unit
 PP_SHARE_FALLBACK = {
     1: 0.670,
     2: 0.330,
@@ -106,7 +104,6 @@ def load_goalie_features():
     gf["date"] = pd.to_datetime(gf["date"])
     gf = gf[gf["toi"] > 30].sort_values("date")
 
-    # Add goalie names from raw logs
     raw = pd.read_csv(
         GOALIE_LOGS_FILE,
         usecols=["player_id", "first_name", "last_name"],
@@ -114,7 +111,6 @@ def load_goalie_features():
     ).drop_duplicates("player_id")
     gf = gf.merge(raw, on="player_id", how="left")
 
-    # League average shots faced per game by starters (20222023+, where xG exists)
     recent = gf[gf["season"] >= 20222023]
     avg_shots_faced = float(recent["shots_against"].mean())
     print(f"  League avg shots faced by starters: {avg_shots_faced:.1f}")
@@ -123,10 +119,7 @@ def load_goalie_features():
 
 
 def get_goalie_gsax(goalie_df, team):
-    """
-    Get most recent starting goalie's GSAx dict for a team.
-    Returns a plain dict — never a Series.
-    """
+    """Get most recent starting goalie's GSAx dict for a team. Always returns dict."""
     team_gf = goalie_df[goalie_df["team"] == team]
     if len(team_gf) == 0:
         return {"gsax_last20": 0.0, "gsax_last30": 0.0,
@@ -147,7 +140,6 @@ def get_goalie_gsax(goalie_df, team):
 
 # ── PP data loading and computation ──────────────────────────────────────────
 def load_pp_shares():
-    """Season-level PP share per player per team per season."""
     pp = pd.read_csv(PP_SHARES_FILE, low_memory=False)
     lookup = {}
     for _, row in pp.iterrows():
@@ -161,11 +153,6 @@ def load_pp_shares():
 
 
 def compute_team_pp_baselines(pbp_path, team_logs_path, last_n_games=20):
-    """
-    Compute each team's PP1/PP2 usage rate from recent games.
-    PP1 usage = avg share of ranks 2-4 players (excludes QB skew).
-    PP2 usage = 1 - PP1 usage.
-    """
     print(f"Computing team PP baselines (last {last_n_games} games)...")
     pbp = pd.read_csv(pbp_path, low_memory=False)
     tgl = pd.read_csv(team_logs_path, low_memory=False)
@@ -217,10 +204,6 @@ def compute_team_pp_baselines(pbp_path, team_logs_path, last_n_games=20):
 
 
 def compute_recent_player_pp_shares(pbp_path, team_logs_path, last_n_games=10):
-    """
-    Compute each player's PP TOI share from their last N games with PP time.
-    Captures recent role changes faster than season averages.
-    """
     print(f"Computing recent player PP shares (last {last_n_games} PP games)...")
     pbp = pd.read_csv(pbp_path, low_memory=False)
     tgl = pd.read_csv(team_logs_path, low_memory=False)
@@ -251,12 +234,6 @@ def compute_recent_player_pp_shares(pbp_path, team_logs_path, last_n_games=10):
 
 def get_pp_share(player_id, team, pp_unit, feature_row,
                  pp_shares, team_pp_baselines, recent_shares):
-    """
-    Get player's expected PP TOI share of team PP time.
-    1. Start with team's PP1/PP2 baseline (lineup assignment = primary)
-    2. Nudge with recent game share (last 10 PP games, max 30% weight)
-    3. Nudge with season history (only if same role, max 20% weight)
-    """
     if pp_unit == 0:
         return PP_SHARE_FALLBACK[0]
 
@@ -267,13 +244,11 @@ def get_pp_share(player_id, team, pp_unit, feature_row,
     )
     share = team_baseline
 
-    # Recent nudge
     recent = recent_shares.get(int(player_id))
     if recent and recent["games"] >= 3:
         recent_weight = min(recent["games"] / 10.0, 1.0) * 0.30
         share = (1 - recent_weight) * share + recent_weight * recent["avg_share"]
 
-    # Season history nudge (same role only)
     try:
         current_season = int(feature_row.get("season", 20252026))
     except (TypeError, ValueError):
@@ -454,6 +429,63 @@ def get_player_features(player_id, features_df, player_info):
     row["is_center"]  = int(str(row.get("position","")) == "C")
     return row
 
+def load_prop_calibration():
+    """Load empirical calibration curves for prop probabilities."""
+    path = DATA_DIR / "processed/prop_calibration.json"
+    if not path.exists():
+        return {}
+    with open(path) as f:
+        return json.load(f)
+
+
+def empirical_over_prob(lam, line, stat, calibration):
+    """
+    Look up empirical P(stat > line | season_avg=lam) from calibration table.
+    Falls back to NegBin if calibration not available.
+    NegBin dispersion parameters fitted from empirical data:
+      shots r=3.87, goals r=2.32, ev_assists r=6.46, points r=3.18
+    """
+    R_BY_STAT = {"shots": 3.87, "goals": 2.32,
+                 "ev_assists": 6.46, "points": 3.18}
+    r = R_BY_STAT.get(stat, 3.5)
+    k = int(line + 0.5)
+
+    # NegBin fallback
+    def negbin_prob(lam, r, k):
+        if lam <= 0: return 0.0
+        p = r / (r + lam)
+        return 1.0 - sum(nbinom.pmf(i, r, p) for i in range(k))
+
+    if not calibration or stat not in calibration:
+        return negbin_prob(lam, r, k)
+
+    line_str  = str(float(line))
+    line_data = calibration[stat].get(line_str, {})
+    if not line_data:
+        return negbin_prob(lam, r, k)
+
+    # Find nearest bucket
+    buckets = {float(k): v for k, v in line_data.items()}
+    if not buckets:
+        return negbin_prob(lam, r, k)
+
+    keys     = sorted(buckets.keys())
+    nearest  = min(keys, key=lambda x: abs(x - lam))
+    distance = abs(nearest - lam)
+
+    # If within 0.5 of a bucket with good sample, use empirical
+    if distance <= 0.5 and buckets[nearest]["n"] >= 50:
+        # Interpolate between two nearest buckets
+        lower = max([k for k in keys if k <= lam], default=None)
+        upper = min([k for k in keys if k >= lam], default=None)
+        if lower is not None and upper is not None and lower != upper:
+            w = (lam - lower) / (upper - lower)
+            p_lower = buckets[lower]["actual"]
+            p_upper = buckets[upper]["actual"]
+            return float(p_lower * (1-w) + p_upper * w)
+        return float(buckets[nearest]["actual"])
+
+    return negbin_prob(lam, r, k)
 
 # ── Prediction ────────────────────────────────────────────────────────────────
 def predict_player(feature_row, player_info, models, feature_lists,
@@ -464,13 +496,15 @@ def predict_player(feature_row, player_info, models, feature_lists,
     player_id  = feature_row.get("player_id", 0)
     team       = player_info.get("team", "")
     pp_unit    = int(player_info.get("pp_unit", 0))
+    eps        = 1e-6
 
     for model_name, model in models.items():
         if model_name == "scored_ev_goal_f" and is_defense:
             continue
         if model_name == "scored_ev_goal_d" and not is_defense:
             continue
-        if model_name == "toi_pp":
+        # toi_pp, ev_shots, pp_shots replaced by formulas below
+        if model_name in ("toi_pp", "ev_shots", "pp_shots"):
             continue
 
         feats = feature_lists[model_name]
@@ -487,9 +521,56 @@ def predict_player(feature_row, player_info, models, feature_lists,
                 prob = raw_prob
             preds["scored_ev_goal"] = prob
         else:
-            preds[model_name] = float(model.predict(X)[0])
+            model_pred = float(model.predict(X)[0])
 
-    # PP TOI via formula: team_pp_toi × player_pp_share
+            # For assist models, blend with recent rate x TOI
+            # to capture hot/cold streaks not reflected in season avg
+            if model_name == "ev_assists":
+                a_last10 = float(feature_row.get("assists_last10", 0) or 0)
+                t_last10 = float(feature_row.get("toi_ev_last10", 1) or 1)
+                rate_l10 = min(a_last10 / (t_last10/60 + eps), 10.0)
+                pred_toi = max(float(feature_row.get("toi_ev_last10", 18) or 18), 1.0)
+                recent_pred = rate_l10 * (pred_toi / 60)
+                model_pred = 0.50 * model_pred + 0.50 * recent_pred
+
+            elif model_name == "pp_assists":
+                a_last10 = float(feature_row.get("pp_assists_last10", 0) or 0)
+                t_last10 = float(feature_row.get("toi_pp_last10", 0.5) or 0.5)
+                rate_l10 = min(a_last10 / (t_last10/60 + eps), 20.0)
+                pred_toi = max(float(feature_row.get("toi_pp_last10", 2) or 2), 0.1)
+                recent_pred = rate_l10 * (pred_toi / 60)
+                model_pred = 0.50 * model_pred + 0.50 * recent_pred
+
+            preds[model_name] = model_pred
+
+    # ── EV shots: rate x TOI formula ─────────────────────────────────────────
+    # 60% weight on last10 rate, 40% on season rate
+    # Preserves tail distribution better than XGBoost regression
+    pred_toi_ev      = max(float(
+        feature_row.get("toi_ev_last10") or
+        feature_row.get("toi_ev_season_avg") or 18.0), 1.0)
+
+    # Predicted TOI from XGBoost toi_ev model
+    if "toi_ev" in models:
+        feats = feature_lists["toi_ev"]
+        x = np.array([feature_row.get(f, 0) or 0 for f in feats]).reshape(1, -1)
+        x = np.nan_to_num(x, nan=0.0)
+        pred_toi_ev = max(float(models["toi_ev"].predict(
+            pd.DataFrame(x, columns=feats))[0]), 1.0)
+        preds["toi_ev"] = pred_toi_ev
+
+    ev_shots_last10  = float(feature_row.get("ev_shots_last10", 0) or 0)
+    toi_ev_last10    = float(feature_row.get("toi_ev_last10", 1) or 1)
+    ev_rate_last10   = min(ev_shots_last10 / (toi_ev_last10 / 60 + eps), 25.0)
+
+    ev_shots_season  = float(feature_row.get("ev_shots_season_avg", 0) or 0)
+    toi_ev_season    = float(feature_row.get("toi_ev_season_avg", 1) or 1)
+    ev_rate_season   = min(ev_shots_season / (toi_ev_season / 60 + eps), 25.0)
+
+    ev_rate_blended  = 0.60 * ev_rate_last10 + 0.40 * ev_rate_season
+    preds["ev_shots"] = ev_rate_blended * (pred_toi_ev / 60)
+
+    # ── PP TOI: team baseline × player share ──────────────────────────────────
     pp_share = get_pp_share(player_id, team, pp_unit, feature_row,
                             pp_shares, team_pp_baselines, recent_shares)
 
@@ -506,16 +587,26 @@ def predict_player(feature_row, player_info, models, feature_lists,
     except (TypeError, ValueError):
         team_pp_toi = 5.15
 
-    preds["toi_pp"] = pp_share * team_pp_toi
+    pred_toi_pp       = pp_share * team_pp_toi
+    preds["toi_pp"]   = pred_toi_pp
+
+    # ── PP shots: rate x TOI formula ─────────────────────────────────────────
+    # 50% weight on last10 rate, 50% on season rate (PP more stable than EV)
+    pp_shots_last10  = float(feature_row.get("pp_shots_last10", 0) or 0)
+    toi_pp_last10    = float(feature_row.get("toi_pp_last10", 0.5) or 0.5)
+    pp_rate_last10   = min(pp_shots_last10 / (toi_pp_last10 / 60 + eps), 40.0)
+
+    pp_shots_season  = float(feature_row.get("pp_shots_season_avg", 0) or 0)
+    toi_pp_season    = float(feature_row.get("toi_pp_season_avg", 0.5) or 0.5)
+    pp_rate_season   = min(pp_shots_season / (toi_pp_season / 60 + eps), 40.0)
+
+    pp_rate_blended  = 0.50 * pp_rate_last10 + 0.50 * pp_rate_season
+    preds["pp_shots"] = pp_rate_blended * (pred_toi_pp / 60)
+
     return preds
 
 
 def compute_goals(preds, feature_row, opp_goalie, avg_shots_faced):
-    """
-    Compute goal predictions using shooting% formula with goalie adjustment.
-    opp_goalie: dict from get_goalie_gsax() — never a Series
-    avg_shots_faced: float computed from goalie data at startup
-    """
     ev_shots = max(preds.get("ev_shots", 0), 0)
     pp_shots = max(preds.get("pp_shots", 0), 0)
     toi_sh   = float(feature_row.get("toi_sh_last20", 0) or 0)
@@ -526,13 +617,16 @@ def compute_goals(preds, feature_row, opp_goalie, avg_shots_faced):
     finishing = float(feature_row.get("regressed_finishing_talent", 1.097) or 1.097)
     pp_sh_pct = float(feature_row.get("regressed_pp_shooting_pct", 0.144) or 0.144)
 
-    # Goalie adjustment: goalie saving +1 GSAx/game on avg_shots_faced shots
-    # means ~(1/avg_shots_faced) fewer goals per shot = proportionally fewer goals
-    gsax          = float(opp_goalie.get("gsax_last20", 0) or 0)
-    goalie_adj    = 1.0 - (gsax / avg_shots_faced)
-    goalie_adj    = max(0.70, min(1.30, goalie_adj))  # cap at ±30%
+    gsax       = float(opp_goalie.get("gsax_last20", 0) or 0)
+    goalie_adj = 1.0 - (gsax / avg_shots_faced)
+    goalie_adj = max(0.70, min(1.30, goalie_adj))
 
     ev_goals_lambda    = ev_shots * ev_sh_pct * finishing * goalie_adj
+    # Recent goals rate adjustment (captures hot streaks)
+    goals_last10  = float(feature_row.get("goals_last10", 0) or 0)
+    # goals_last10 is already per-game avg from rolling window
+    # Blend: 60% formula, 40% recent rate
+    ev_goals_lambda = 0.60 * ev_goals_lambda + 0.40 * goals_last10
     pp_goals_lambda    = pp_shots * pp_sh_pct * goalie_adj
     total_goals_lambda = ev_goals_lambda + pp_goals_lambda
 
@@ -552,9 +646,18 @@ def compute_assists(preds):
     return max(preds.get("ev_assists", 0), 0) + max(preds.get("pp_assists", 0), 0)
 
 
-def poisson_over_prob(lam, line):
-    k = int(line + 0.5)
-    return 1 - poisson.cdf(k - 1, lam)
+def nb_over_prob(lam, line, r=3.88):
+    """
+    Negative Binomial probability of exceeding line.
+    r=3.88 fitted from empirical shot data (variance/mean ratio = 1.405).
+    NegBin better accounts for overdispersion in shot counts vs Poisson.
+    """
+    if lam <= 0:
+        return 0.0
+    k   = int(line + 0.5)
+    p   = r / (r + lam)
+    cdf = sum(nbinom.pmf(i, r, p) for i in range(k))
+    return 1.0 - cdf
 
 
 def format_prob(p):
@@ -585,6 +688,10 @@ def main():
 
     print("\nLoading models...")
     models, feature_lists, model_types, calibrators, residual_stds = load_models()
+
+    print("Loading prop calibration...")
+    prop_calibration = load_prop_calibration()
+    print(f"  Stats calibrated: {list(prop_calibration.keys())}")
 
     print("Loading PP shares...")
     pp_shares = load_pp_shares()
@@ -619,7 +726,7 @@ def main():
 
     for team, is_home in [(home_team, True), (away_team, False)]:
         opp_team   = away_team if is_home else home_team
-        opp_goalie = get_goalie_gsax(goalie_df, opp_team)  # always a dict
+        opp_goalie = get_goalie_gsax(goalie_df, opp_team)
         goalie_adj = 1.0 - (opp_goalie["gsax_last20"] / avg_shots_faced)
         goalie_adj = max(0.70, min(1.30, goalie_adj))
 
@@ -731,21 +838,21 @@ def main():
             all_players.extend(res["players"])
         all_players.sort(key=lambda x: x["shots"], reverse=True)
         for r in all_players[:10]:
-            p_over = poisson_over_prob(r["shots"], 2.5)
+            p_over = empirical_over_prob(r["shots"], 2.5, "shots", prop_calibration)
             print(f"    {r['name']:<22} {r['shots']:.1f} shots  "
                   f"o2.5: {format_prob(p_over)}")
 
         print(f"\n  TOP GOAL PROPS (anytime scorer):")
         all_players.sort(key=lambda x: x["goals"], reverse=True)
         for r in all_players[:10]:
-            p_goal = poisson_over_prob(r["goals"], 0.5)
+            p_goal = empirical_over_prob(r["goals"], 0.5, "goals", prop_calibration)
             print(f"    {r['name']:<22} λ={r['goals']:.3f}  "
                   f"anytime: {format_prob(p_goal)}")
 
         print(f"\n  TOP POINT PROPS (o0.5):")
         all_players.sort(key=lambda x: x["points"], reverse=True)
         for r in all_players[:10]:
-            p_point = poisson_over_prob(r["points"], 0.5)
+            p_point = empirical_over_prob(r["points"], 0.5, "points", prop_calibration)
             print(f"    {r['name']:<22} {r['points']:.3f} pts  "
                   f"o0.5: {format_prob(p_point)}")
 

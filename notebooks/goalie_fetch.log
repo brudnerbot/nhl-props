@@ -1,0 +1,58 @@
+Step 1: Building goalie list...
+  Season 20152016:
+    ERROR SEA 20152016: 404 Client Error: Not Found for url: https://api-web.nhle.com/v1/roster/SEA/20152016
+    ERROR UTA 20152016: 404 Client Error: Not Found for url: https://api-web.nhle.com/v1/roster/UTA/20152016
+    ERROR VGK 20152016: 404 Client Error: Not Found for url: https://api-web.nhle.com/v1/roster/VGK/20152016
+    Unique goalies so far: 88
+  Season 20162017:
+    ERROR SEA 20162017: 404 Client Error: Not Found for url: https://api-web.nhle.com/v1/roster/SEA/20162017
+    ERROR UTA 20162017: 404 Client Error: Not Found for url: https://api-web.nhle.com/v1/roster/UTA/20162017
+    ERROR VGK 20162017: 404 Client Error: Not Found for url: https://api-web.nhle.com/v1/roster/VGK/20162017
+    Unique goalies so far: 104
+  Season 20172018:
+    ERROR SEA 20172018: 404 Client Error: Not Found for url: https://api-web.nhle.com/v1/roster/SEA/20172018
+    ERROR UTA 20172018: 404 Client Error: Not Found for url: https://api-web.nhle.com/v1/roster/UTA/20172018
+    Unique goalies so far: 122
+  Season 20182019:
+    ERROR SEA 20182019: 404 Client Error: Not Found for url: https://api-web.nhle.com/v1/roster/SEA/20182019
+    ERROR UTA 20182019: 404 Client Error: Not Found for url: https://api-web.nhle.com/v1/roster/UTA/20182019
+    Unique goalies so far: 135
+  Season 20192020:
+    ERROR SEA 20192020: 404 Client Error: Not Found for url: https://api-web.nhle.com/v1/roster/SEA/20192020
+    ERROR UTA 20192020: 404 Client Error: Not Found for url: https://api-web.nhle.com/v1/roster/UTA/20192020
+    Unique goalies so far: 148
+  Season 20202021:
+    ERROR SEA 20202021: 404 Client Error: Not Found for url: https://api-web.nhle.com/v1/roster/SEA/20202021
+    ERROR UTA 20202021: 404 Client Error: Not Found for url: https://api-web.nhle.com/v1/roster/UTA/20202021
+    Unique goalies so far: 165
+  Season 20212022:
+    ERROR UTA 20212022: 404 Client Error: Not Found for url: https://api-web.nhle.com/v1/roster/UTA/20212022
+    Unique goalies so far: 186
+  Season 20222023:
+    ERROR UTA 20222023: 404 Client Error: Not Found for url: https://api-web.nhle.com/v1/roster/UTA/20222023
+    Unique goalies so far: 202
+  Season 20232024:
+    ERROR UTA 20232024: 404 Client Error: Not Found for url: https://api-web.nhle.com/v1/roster/UTA/20232024
+    Unique goalies so far: 213
+  Season 20242025:
+    Unique goalies so far: 223
+  Season 20252026:
+    Unique goalies so far: 226
+
+Total unique goalies found: 226
+
+Step 2: Fetching goalie game logs...
+  0/226 goalies fetched...
+  20/226 goalies fetched...
+  40/226 goalies fetched...
+  60/226 goalies fetched...
+  80/226 goalies fetched...
+  100/226 goalies fetched...
+  120/226 goalies fetched...
+  140/226 goalies fetched...
+  160/226 goalies fetched...
+  180/226 goalies fetched...
+  200/226 goalies fetched...
+  220/226 goalies fetched...
+
+Done! 28449 rows saved to /Users/brudnerbot/nhl-props/data/raw/goalie_game_logs/goalie_game_logs.csv

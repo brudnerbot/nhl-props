@@ -1,0 +1,50 @@
+============================================================
+BUILDING PLAYER FEATURES
+============================================================
+Loading player game logs...
+  Game logs: 339,853 rows, 11 seasons
+Loading player PBP stats...
+  PBP stats: 75,952 rows, 2 seasons
+  After merge: 339,853 rows
+  Rows with PBP data: 66,986
+Computing individual xG per player per game...
+  Rows with xG data: 125,139
+Adding team context...
+  Team context added: 229,420 rows
+Computing per-game rates...
+
+Base dataset: 339,853 rows, 86 columns
+Seasons: [np.int64(20152016), np.int64(20162017), np.int64(20172018), np.int64(20182019), np.int64(20192020), np.int64(20202021), np.int64(20212022), np.int64(20222023), np.int64(20232024), np.int64(20242025), np.int64(20252026)]
+Players: 935
+Computing rolling features...
+  Computing within-season rolling windows...
+  Computing season averages...
+  Computing career features...
+  Rolling features computed: 339,853 rows
+Computing cumulative per-60 rates...
+  Cumulative rates added
+
+============================================================
+DONE
+============================================================
+  Rows:    339,853
+  Columns: 234
+  Saved:   /Users/brudnerbot/nhl-props/data/processed/player_features.csv
+  Base game stats:  87
+  Rolling features: 132
+  Career features:  3
+  Cumulative rates: 12
+
+McDavid sample (last game):
+  season: 20252026
+  date: 2026-03-26 00:00:00
+  toi_ev: 18.869999999999997
+  toi_pp: 2.22
+  ev_shots: 1.6
+  ixg: 0.0
+  ev_shots_per60_last20: 7.3892744724306905
+  pp_shots_per60_last20: 14.609640769495934
+  regressed_ev_shooting_pct: 0.17779996361336295
+  career_games: 784
+  ev_onice_sf_per60_last20: 22.882343668431158
+  ipp_last20: 0.6249998375001563

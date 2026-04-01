@@ -68,14 +68,18 @@ def classify_strength(code: str, is_home: bool) -> str:
     hg, hs, as_, ag, is_en = decoded
 
     if is_en:
-        # Empty net — classify by skater differential (ignore missing goalie)
-        # 6v5 = EV, 6v4 = PP for team with extra skater, 5v6 = SH
-        if hs == as_:
+        # Adjust skater count: the team that pulled goalie has an extra skater
+        # that compensates for missing goalie — treat as equal strength
+        # hg=0 means home pulled goalie → home effectively has hs-1 skaters
+        # ag=0 means away pulled goalie → away effectively has as_-1 skaters
+        adj_hs = hs - (1 if hg == 0 else 0)
+        adj_as = as_ - (1 if ag == 0 else 0)
+        if adj_hs == adj_as:
             return "ev"
         if is_home:
-            return "pp" if hs > as_ else "sh"
+            return "pp" if adj_hs > adj_as else "sh"
         else:
-            return "pp" if as_ > hs else "sh"
+            return "pp" if adj_as > adj_hs else "sh"
 
     if hs == as_:
         return "ev"
@@ -274,9 +278,12 @@ def process_game(game_id: int, season: int, date: str,
         hg, hs, as_, ag, is_en = decoded
 
         def get_strength(pid):
-            # Use classify_strength for consistency with TOI classification
+            adj_hs = hs - (1 if hg == 0 else 0)
+            adj_as = as_ - (1 if ag == 0 else 0)
+            if adj_hs == adj_as: return "ev"
             ih = roster.get(pid, {}).get("is_home", True)
-            return classify_strength(sit, ih)
+            if ih: return "pp" if adj_hs > adj_as else "sh"
+            else:  return "pp" if adj_as > adj_hs else "sh"
 
         if etype in ("shot-on-goal", "goal"):
             shooter = det.get("shootingPlayerId") or det.get("scoringPlayerId")

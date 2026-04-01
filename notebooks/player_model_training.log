@@ -1,0 +1,170 @@
+Loading player features...
+Train skaters: 299,231 | Test skaters: 40,622
+Candidate features: 321
+
+============================================================
+TRAINING PLAYER MODELS
+============================================================
+
+--- toi_ev (regression) ---
+  Train: 299,231 | Test: 40,622
+  Selecting features...
+  Training...
+  MAE:      1.831 min  (baseline: 3.066)
+  Bias:     -0.190
+  Corr:     0.780
+  Pred std: 2.844  Actual std: 3.855
+  Top 10 features:
+    toi_ev_ewm10                                  0.3285
+    toi_ev_last30                                 0.2172
+    toi_ev_last20                                 0.1198
+    toi_ev_season_avg                             0.0664
+    toi_last5                                     0.0436
+    shots_last10                                  0.0237
+    indiv_shot_attempts_last10                    0.0223
+    is_defense                                    0.0167
+    toi_last10                                    0.0113
+    toi_ev_trend_ratio                            0.0101
+
+--- toi_pp (regression) ---
+  Train: 299,231 | Test: 40,622
+  Selecting features...
+  Training...
+  MAE:      0.588 min  (baseline: 0.951)
+  Bias:     +0.137
+  Corr:     0.758
+  Pred std: 1.075  Actual std: 1.328
+  Top 10 features:
+    is_pp_player                                  0.4901
+    pp_toi_share_last10                           0.0686
+    toi_pp_ewm10                                  0.0649
+    toi_pp_last30                                 0.0569
+    toi_pp_season_avg                             0.0513
+    pp_toi_share_last5                            0.0454
+    pp_shots_api_filled                           0.0323
+    toi_pp_last20                                 0.0283
+    pp_shot_attempts_last20                       0.0191
+    pp_toi_share_season_avg                       0.0132
+
+--- ev_shots (regression) ---
+  Train: 298,967 | Test: 40,570
+  Selecting features...
+  Training...
+  MAE:      0.867 shots  (baseline: 0.960)
+  Bias:     +0.025
+  Corr:     0.396
+  Pred std: 0.399  Actual std: 1.215
+  Top 10 features:
+    shots_season_avg                              0.2738
+    shots_last30                                  0.1608
+    ev_shots_season_avg                           0.1176
+    ev_shots_last30                               0.0443
+    shots_last20                                  0.0381
+    regressed_sh_shots_per60                      0.0256
+    pp_shots_api_filled                           0.0118
+    toi_ev_season_avg                             0.0106
+    toi_ev_ewm10                                  0.0095
+    ev_shots_ewm10                                0.0095
+
+--- pp_shots (regression) ---
+  Train: 279,441 | Test: 39,246
+  Selecting features...
+  Training...
+  MAE:      0.085 shots  (baseline: 0.298)
+  Bias:     -0.049
+  Corr:     0.958
+  Pred std: 0.438  Actual std: 0.467
+  Top 10 features:
+    pp_shots_api_filled                           0.3026
+    indiv_shot_attempts_last5                     0.1346
+    team_pp_toi_season_avg                        0.1042
+    team_ev_toi_last5                             0.0561
+    ev_shots_season_avg                           0.0358
+    team_pp_toi_last30                            0.0340
+    team_pp_toi_last5                             0.0312
+    pp_shots_season_avg                           0.0271
+    ev_cf_pct_last5                               0.0243
+    ev_onice_sa_per60_last5                       0.0211
+
+--- ev_assists (regression) ---
+  Train: 298,967 | Test: 40,570
+  Selecting features...
+  Training...
+  MAE:      0.339 assists  (baseline: 0.342)
+  Bias:     +0.012
+  Corr:     0.171
+  Pred std: 0.082  Actual std: 0.466
+  Top 10 features:
+    points_season_avg                             0.1646
+    assists_season_avg                            0.1053
+    points_last30                                 0.0800
+    assists_last30                                0.0266
+    toi_last5                                     0.0258
+    toi_ev_last20                                 0.0249
+    toi_ev_season_avg                             0.0243
+    toi_pp_last5                                  0.0192
+    pp_assists_season_avg                         0.0188
+    ixg_last30                                    0.0179
+
+--- pp_assists (regression) ---
+  Train: 279,441 | Test: 39,246
+  Selecting features...
+  Training...
+  MAE:      0.132 assists  (baseline: 0.124)
+  Bias:     +0.020
+  Corr:     0.252
+  Pred std: 0.076  Actual std: 0.269
+  Top 10 features:
+    pp_assists_season_avg                         0.2439
+    assists_season_avg                            0.0855
+    pp_assists_last30                             0.0592
+    pp_shots_api_filled                           0.0383
+    pp_ixg_last5                                  0.0367
+    points_season_avg                             0.0329
+    pp_toi_share_last30                           0.0194
+    toi_pp_ewm10                                  0.0193
+    pp_toi_share_last20                           0.0182
+    pp_toi_share_last10                           0.0175
+
+--- scored_ev_goal_f (classifier) ---
+  Train: 197,702 | Test: 26,957
+  Positive rate: 0.155 train / 0.144 test
+  Selecting features...
+  Training...
+  AUC:       0.6263
+  LogLoss:   0.4024  (baseline: 0.4126)
+  Goal rate: 0.144  Mean pred: 0.137
+  Top 10 features:
+    shots_season_avg                              0.1213
+    shots_last30                                  0.0654
+    toi_ev_ewm10                                  0.0333
+    toi_last30                                    0.0289
+    pp_toi_share_last30                           0.0286
+    shots_last20                                  0.0257
+    is_pp_player                                  0.0254
+    toi_ev_last10                                 0.0253
+    toi_ev_last20                                 0.0234
+    pp_toi_share_last20                           0.0225
+
+============================================================
+SAVING MODELS
+============================================================
+  Saved: toi_ev.json
+  Saved: toi_pp.json
+  Saved: ev_shots.json
+  Saved: pp_shots.json
+  Saved: ev_assists.json
+  Saved: pp_assists.json
+  Saved: scored_ev_goal_f.json
+  Saved: feature_lists.pkl, residual_stds.pkl, model_types.pkl, calibrators.pkl
+
+============================================================
+SUMMARY
+============================================================
+  toi_ev                    MAE: 1.831 min
+  toi_pp                    MAE: 0.588 min
+  ev_shots                  MAE: 0.867 shots
+  pp_shots                  MAE: 0.085 shots
+  ev_assists                MAE: 0.339 assists
+  pp_assists                MAE: 0.132 assists
+  scored_ev_goal_f          AUC: 0.6263
