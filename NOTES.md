@@ -586,3 +586,14 @@ Team PP usage rates (20252026, last 20 games):
 7. build_player_model.py      → models/player/
 8. fetch_daily_lineups.py     → data/raw/lineups/lineups_YYYYMMDD.json
 9. predict_player_props.py    → predictions output
+
+## Pipeline Order (Phase 3)
+1. fetch_shot_data.py         → data/raw/shot_data/shot_data.csv
+2. build_xg_model.py          → data/processed/shot_data_with_xg.csv
+3. build_zone_features.py     → data/processed/player_zone_shots.csv, team_zone_*.csv, zone_averages.json
+4. fetch_player_pbp_stats.py  → data/raw/player_pbp_stats/player_pbp_stats.csv
+5. fetch_goalie_game_logs.py  → data/raw/goalie_game_logs/goalie_game_logs.csv
+6. process_player_features.py → data/processed/player_features.csv
+7. build_player_model.py      → models/player/
+8. fetch_daily_lineups.py     → data/raw/lineups/lineups_YYYYMMDD.json
+9. predict_player_props.py    → predictions output
