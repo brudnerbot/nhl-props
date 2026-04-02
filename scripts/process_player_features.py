@@ -645,6 +645,51 @@ def add_opponent_goalie_context(df, goalie_features_path):
     print(f"  Opponent goalie GSAx joined: {covered:,}/{len(df):,} rows ({covered/len(df):.1%})")
     return df
 
+def add_player_zone_features(df):
+    """Add per-player rolling shot rates by zone."""
+    print("Adding player zone shot features...")
+    pz_path = DATA_DIR / "processed/player_zone_shots.csv"
+    if not pz_path.exists():
+        print("  player_zone_shots.csv not found — skipping (run build_zone_features.py first)")
+        return df
+    pz = pd.read_csv(pz_path, low_memory=False)
+    pz["player_id"] = pz["player_id"].astype("Int64")
+    df["player_id"] = df["player_id"].astype("Int64")
+
+    ZONES = ["net_front","slot","left_flank","right_flank",
+             "left_point","mid_point","right_point"]
+    zone_cols = (
+        [f"{z}_season_avg" for z in ZONES] +
+        [f"{z}_last10"     for z in ZONES]
+    )
+    pz = pz[["game_id","player_id"] + zone_cols].copy()
+    df = df.merge(pz, on=["game_id","player_id"], how="left")
+
+    covered = df["slot_season_avg"].notna().sum()
+    print(f"  Player zone features joined: {covered:,}/{len(df):,} ({covered/len(df):.1%})")
+    return df
+
+
+def add_team_zone_defense(df):
+    """Add per-team zone shots allowed (opponent defensive context by zone)."""
+    print("Adding team zone defense features...")
+    tz_path = DATA_DIR / "processed/team_zone_defense.csv"
+    if not tz_path.exists():
+        print("  team_zone_defense.csv not found — skipping (run build_zone_features.py first)")
+        return df
+    tz = pd.read_csv(tz_path, low_memory=False)
+
+    ZONES = ["net_front","slot","left_flank","right_flank",
+             "left_point","mid_point","right_point"]
+    opp_cols = [f"opp_{z}_allowed_last30" for z in ZONES]
+    tz = tz[["game_id","defending_team"] + opp_cols].copy()
+    tz = tz.rename(columns={"defending_team":"opponent"})
+    df = df.merge(tz, on=["game_id","opponent"], how="left")
+
+    covered = df["opp_slot_allowed_last30"].notna().sum()
+    print(f"  Team zone defense joined: {covered:,}/{len(df):,} ({covered/len(df):.1%})")
+    return df
+
 def main():
     print("="*60)
     print("BUILDING PLAYER FEATURES")
@@ -654,6 +699,8 @@ def main():
     df = add_individual_xg(df, SHOT_XG)
     df = add_team_context(df, TEAM_GL)
     df = add_opponent_goalie_context(df, DATA_DIR / "processed/goalie_features.csv")
+    df = add_player_zone_features(df)
+    df = add_team_zone_defense(df)
     df = add_pp_career_stats(df, PLAYER_PP)
     df = add_corsi_stats(df, PLAYER_CORSI)
     df = add_game_rates(df)
