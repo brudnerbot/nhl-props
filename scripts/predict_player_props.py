@@ -668,6 +668,99 @@ def format_prob(p):
         odds = round(((1 - p) / p) * 100)
     return f"{p:.1%} ({odds:+d})"
 
+# ── Zone profile loading ──────────────────────────────────────────────────────
+def load_zone_data():
+    """Load zone averages, player zone shots, team zone defense."""
+    zone_avgs_path = DATA_DIR / "processed/zone_averages.json"
+    if not zone_avgs_path.exists():
+        return None, None, None
+    with open(zone_avgs_path) as f:
+        zone_avgs = json.load(f)
+
+    pz = pd.read_csv(DATA_DIR / "processed/player_zone_shots.csv", low_memory=False)
+    pz["player_id"] = pz["player_id"].astype("Int64")
+
+    tz = pd.read_csv(DATA_DIR / "processed/team_zone_defense.csv", low_memory=False)
+
+    return zone_avgs, pz, tz
+
+
+def print_zone_matchup(home_team, away_team, player_rows_home, player_rows_away,
+                       features_df, zone_avgs, pz_df, tz_df):
+    """Print zone shot profiles for top players and team defense context."""
+    if zone_avgs is None:
+        return
+
+    ZONES        = ["net_front","slot","left_flank","right_flank",
+                    "left_point","mid_point","right_point"]
+    ZONE_SHORT   = ["net","slot","l.flk","r.flk","l.pt","mid","r.pt"]
+    pos_props    = zone_avgs["position_zone_props"]
+    league_def   = zone_avgs["league_defense_avg"]
+    league_total = sum(league_def.values())
+    league_def_p = {z: league_def[z]/league_total for z in ZONES}
+
+    def get_player_zone_props(player_id):
+        rows = pz_df[pz_df["player_id"]==player_id].sort_values("date")
+        if len(rows) == 0:
+            return None
+        latest = rows.iloc[-1]
+        vals = {z: float(latest.get(f"{z}_season_avg") or 0) for z in ZONES}
+        total = sum(vals.values()) + 1e-6
+        return {z: v/total for z,v in vals.items()}
+
+    def get_team_zone_defense(team):
+        rows = tz_df[tz_df["defending_team"]==team].sort_values("date")
+        if len(rows) == 0:
+            return None
+        latest = rows.iloc[-1]
+        vals = {z: float(latest.get(f"opp_{z}_allowed_last30") or 0) for z in ZONES}
+        total = sum(vals.values()) + 1e-6
+        return {z: v/total for z,v in vals.items()}
+
+    def fmt_diff(p, avg):
+        d = p - avg
+        sign = "+" if d >= 0 else ""
+        return f"{p:.0%}({sign}{d:+.0%})"
+
+    print(f"\n{'='*60}")
+    print(f"ZONE MATCHUP CONTEXT")
+    print(f"{'='*60}")
+
+    # Header
+    print(f"\n  {'Player':<22} {'Pos':>3} | " +
+          " | ".join(f"{z:>10}" for z in ZONE_SHORT))
+    print(f"  {'-'*22} {'-'*3}-" + "-+-".join(["-"*10]*len(ZONES)))
+
+    for team, player_rows, label in [
+        (home_team, player_rows_home, "HOME"),
+        (away_team, player_rows_away, "AWAY"),
+    ]:
+        print(f"\n  -- {team} ({label}) players vs position avg --")
+        top = sorted(player_rows, key=lambda r: r["shots"], reverse=True)[:6]
+        for r in top:
+            pid = features_df[features_df["full_name"]==r["name"]]["player_id"]
+            if len(pid) == 0:
+                continue
+            pid = int(pid.iloc[0])
+            props = get_player_zone_props(pid)
+            if props is None:
+                continue
+            is_def = "D" in r["role"]
+            pos_key = "defense" if is_def else "forward"
+            pp = pos_props[pos_key]
+            parts = [fmt_diff(props[z], pp[z]) for z in ZONES]
+            print(f"  {r['name']:<22} {'D' if is_def else 'F':>3} | " +
+                  " | ".join(f"{p:>10}" for p in parts))
+
+    # Team zone defense
+    print(f"\n  -- Team zone shots ALLOWED vs league avg (last 30) --")
+    print(f"  {'Team':<6} | " + " | ".join(f"{z:>10}" for z in ZONE_SHORT))
+    for team in [home_team, away_team]:
+        props = get_team_zone_defense(team)
+        if props is None:
+            continue
+        parts = [fmt_diff(props[z], league_def_p[z]) for z in ZONES]
+        print(f"  {team:<6} | " + " | ".join(f"{p:>10}" for p in parts))
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 def main():
@@ -717,6 +810,9 @@ def main():
     print("Loading goalie features...")
     goalie_df, avg_shots_faced = load_goalie_features()
     print(f"  {len(goalie_df):,} starter game records loaded")
+
+    print("Loading zone data...")
+    zone_avgs, pz_df, tz_df = load_zone_data()
 
     print("Loading lineups...")
     lineups = load_lineup(date_str)
@@ -855,6 +951,13 @@ def main():
             p_point = empirical_over_prob(r["points"], 0.5, "points", prop_calibration)
             print(f"    {r['name']:<22} {r['points']:.3f} pts  "
                   f"o0.5: {format_prob(p_point)}")
+
+        print_zone_matchup(
+            home_team, away_team,
+            team_results[home_team]["players"],
+            team_results[away_team]["players"],
+            features_df, zone_avgs, pz_df, tz_df,
+        )
 
 
 if __name__ == "__main__":
