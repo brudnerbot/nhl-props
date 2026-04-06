@@ -58,6 +58,7 @@ ROLL_STATS = [
     "ipp", "ev_toi_share", "pp_toi_share",
     "hits", "blocks", "faceoffs_won", "faceoffs_taken",
     "is_pp_player",
+    "is_b2b",
     # Corsi — only populated for 20202021+
     "indiv_shot_attempts", "indiv_missed_shots", "indiv_shots_blocked",
     "ev_shot_attempts", "pp_shot_attempts",
@@ -294,6 +295,14 @@ def add_corsi_stats(df, corsi_path):
 def add_game_rates(df):
     print("Computing per-game rates...")
     eps = 1e-6
+
+    # B2B flag: did this player play yesterday?
+    df = df.sort_values(["player_id","date"]).reset_index(drop=True)
+    df["prev_date"] = df.groupby("player_id")["date"].shift(1)
+    df["days_rest"] = (df["date"] - df["prev_date"]).dt.days
+    df["is_b2b"] = (df["days_rest"] == 1).astype(int)
+    df = df.drop(columns=["prev_date","days_rest"])
+    print(f"  B2B games flagged: {df['is_b2b'].sum():,} ({df['is_b2b'].mean():.1%})")
 
     df["ev_shooting_pct"] = df["ev_goals"] / (df["ev_shots"] + eps)
     df["pp_shooting_pct"] = df["pp_goals"] / (df["pp_shots"] + eps)

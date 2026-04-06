@@ -935,7 +935,13 @@ def main():
                 "shots":            computed["total_shots_lambda"],
                 "shots_season_avg": float(feat_row.get("shots_season_avg", 0) or 0),
                 "goals_season_avg": float(feat_row.get("goals_season_avg", 0) or 0),
-                "points_season_avg":float(feat_row.get("points_season_avg", 0) or 0),
+                "points_season_avg":     float(feat_row.get("points_season_avg", 0) or 0),
+                "points_last20":         float(feat_row.get("points_last20", 0) or 0),
+                "goals_season_avg":      float(feat_row.get("goals_season_avg", 0) or 0),
+                "goals_last20":          float(feat_row.get("goals_last20", 0) or 0),
+                "shots_last20":          float(feat_row.get("shots_last20", 0) or 0),
+                "ev_assists_season_avg": float(feat_row.get("ev_assists_season_avg", 0) or 0),
+                "ev_assists_last20":     float(feat_row.get("ev_assists_last20", 0) or 0),
                 "ev_shots":         computed["ev_shots"],
                 "pp_shots":         computed["pp_shots"],
                 "goals":            computed["total_goals_lambda"],
@@ -996,7 +1002,8 @@ def main():
         print(f"  {'-'*22} {'-'*5} {'-'*8} {'-'*8} {'-'*8} {'-'*8} {'-'*8} {'-'*8} {'-'*8}")
         all_players.sort(key=lambda x: x["shots"], reverse=True)
         for r in all_players[:12]:
-            cal_lam = r.get("shots_season_avg") or r["shots"]
+            cal_lam = 0.5*float(r.get("shots_season_avg") or r["shots"]) + \
+                      0.5*float(r.get("shots_last20") or r["shots"])
             o25 = empirical_over_prob(cal_lam, 2.5, "shots", prop_calibration)
             o35 = empirical_over_prob(cal_lam, 3.5, "shots", prop_calibration)
             o45 = empirical_over_prob(cal_lam, 4.5, "shots", prop_calibration)
@@ -1018,7 +1025,8 @@ def main():
         print(f"  {'-'*22} {'-'*6} {'-'*10} {'-'*10}")
         all_players.sort(key=lambda x: x["goals"], reverse=True)
         for r in all_players[:12]:
-            cal_lam = r.get("goals_season_avg") or r["goals"]
+            cal_lam = 0.5*float(r.get("goals_season_avg") or r["goals"]) + \
+                      0.5*float(r.get("goals_last20") or r["goals"])
             p1 = empirical_over_prob(cal_lam, 0.5, "goals", prop_calibration)
             p2 = empirical_over_prob(cal_lam, 1.5, "goals", prop_calibration)
             print(f"  {r['name']:<22} {r['goals']:>6.3f} "
@@ -1030,7 +1038,8 @@ def main():
         print(f"  {'-'*22} {'-'*6} {'-'*10} {'-'*10} {'-'*10}")
         all_players.sort(key=lambda x: x["points"], reverse=True)
         for r in all_players[:12]:
-            cal_lam = r.get("points_season_avg") or r["points"]
+            cal_lam = 0.5*float(r.get("points_season_avg") or r["points"]) + \
+                      0.5*float(r.get("points_last20") or r["points"])
             p05 = empirical_over_prob(cal_lam, 0.5,  "points", prop_calibration)
             p15 = empirical_over_prob(cal_lam, 1.5,  "points", prop_calibration)
             p25 = empirical_over_prob(cal_lam, 2.5,  "points", prop_calibration)
