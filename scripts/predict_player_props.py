@@ -525,21 +525,8 @@ def predict_player(feature_row, player_info, models, feature_lists,
 
             # For assist models, blend with recent rate x TOI
             # to capture hot/cold streaks not reflected in season avg
-            if model_name == "ev_assists":
-                a_last10 = float(feature_row.get("assists_last10", 0) or 0)
-                t_last10 = float(feature_row.get("toi_ev_last10", 1) or 1)
-                rate_l10 = min(a_last10 / (t_last10/60 + eps), 10.0)
-                pred_toi = max(float(feature_row.get("toi_ev_last10", 18) or 18), 1.0)
-                recent_pred = rate_l10 * (pred_toi / 60)
-                model_pred = 0.50 * model_pred + 0.50 * recent_pred
-
-            elif model_name == "pp_assists":
-                a_last10 = float(feature_row.get("pp_assists_last10", 0) or 0)
-                t_last10 = float(feature_row.get("toi_pp_last10", 0.5) or 0.5)
-                rate_l10 = min(a_last10 / (t_last10/60 + eps), 20.0)
-                pred_toi = max(float(feature_row.get("toi_pp_last10", 2) or 2), 0.1)
-                recent_pred = rate_l10 * (pred_toi / 60)
-                model_pred = 0.50 * model_pred + 0.50 * recent_pred
+            if model_name in ("ev_assists", "pp_assists"):
+                pass  # XGBoost prediction used directly — blending hurts MAE
 
             preds[model_name] = model_pred
 
@@ -762,6 +749,53 @@ def print_zone_matchup(home_team, away_team, player_rows_home, player_rows_away,
         parts = [fmt_diff(props[z], league_def_p[z]) for z in ZONES]
         print(f"  {team:<6} | " + " | ".join(f"{p:>10}" for p in parts))
 
+# ── B2B loading and detection ─────────────────────────────────────────────────
+def load_b2b_effects():
+    path = DATA_DIR / "processed/b2b_effects.json"
+    if not path.exists():
+        return {}
+    with open(path) as f:
+        return json.load(f)
+
+
+def detect_b2b(team, date_str=None):
+    """Check if team played yesterday based on team game logs."""
+    tgl = pd.read_csv(TEAM_LOGS_FILE, low_memory=False)
+    tgl["date"] = pd.to_datetime(tgl["date"])
+    team_games = tgl[tgl["team"]==team].sort_values("date")
+    if len(team_games) == 0:
+        return False
+    last_game = team_games.iloc[-1]["date"]
+    if date_str:
+        target = pd.to_datetime(date_str)
+    else:
+        target = pd.Timestamp.now().normalize()
+    days_rest = (target - last_game).days
+    return days_rest == 1
+
+
+def get_team_b2b_ratio(team, stat, b2b_data):
+    """Get team-specific B2B ratio, fall back to league average."""
+    team_ratios = b2b_data.get("team_b2b", {}).get(team, {})
+    if stat in team_ratios:
+        return float(team_ratios[stat]["ratio"])
+    league = b2b_data.get("league_team_b2b", {})
+    if stat in league:
+        return float(league[stat]["ratio"])
+    return 1.0
+
+
+def get_player_b2b_ratio(player_id, stat, is_defense, b2b_data):
+    """Get player-specific B2B ratio, fall back to position league average."""
+    player_ratios = b2b_data.get("player_b2b", {}).get(str(int(player_id)), {})
+    if stat in player_ratios:
+        return float(player_ratios[stat]["ratio"])
+    pos_key = "defense" if is_defense else "forward"
+    league = b2b_data.get("league_player_b2b", {}).get(pos_key, {})
+    if stat in league:
+        return float(league[stat]["ratio"])
+    return 1.0
+
 # ── Main ──────────────────────────────────────────────────────────────────────
 def main():
     parser = argparse.ArgumentParser()
@@ -814,6 +848,9 @@ def main():
     print("Loading zone data...")
     zone_avgs, pz_df, tz_df = load_zone_data()
 
+    print("Loading B2B effects...")
+    b2b_data = load_b2b_effects()
+
     print("Loading lineups...")
     lineups = load_lineup(date_str)
     primary, secondary, tertiary = build_name_lookup(features_df)
@@ -825,6 +862,11 @@ def main():
         opp_goalie = get_goalie_gsax(goalie_df, opp_team)
         goalie_adj = 1.0 - (opp_goalie["gsax_last20"] / avg_shots_faced)
         goalie_adj = max(0.70, min(1.30, goalie_adj))
+
+        # Detect if this team is on a B2B
+        is_b2b = detect_b2b(team, date_str)
+        team_shot_b2b_ratio = get_team_b2b_ratio(team, "ev_shots_on_goal_for", b2b_data)
+        team_goal_b2b_ratio = get_team_b2b_ratio(team, "goals_for", b2b_data)
 
         players = extract_players_from_lineup(lineups, team, is_home)
 
@@ -861,6 +903,17 @@ def main():
             preds    = predict_player(feat_row, p, models, feature_lists,
                                       model_types, calibrators, pp_shares,
                                       team_pp_baselines, recent_shares)
+
+            # Apply B2B adjustments
+            if is_b2b:
+                pid_int    = int(feat_row.get("player_id", 0))
+                is_def     = int(feat_row.get("is_defense", 0))
+                shot_ratio = get_player_b2b_ratio(pid_int, "shots", is_def, b2b_data)
+                # Blend player ratio with team ratio (60/40)
+                combined_shot_ratio = 0.60 * shot_ratio + 0.40 * team_shot_b2b_ratio
+                preds["ev_shots"] = preds.get("ev_shots", 0) * combined_shot_ratio
+                preds["pp_shots"] = preds.get("pp_shots", 0) * combined_shot_ratio
+
             computed = compute_goals(preds, feat_row,
                                      opp_goalie=opp_goalie,
                                      avg_shots_faced=avg_shots_faced)
@@ -875,19 +928,22 @@ def main():
             team_goals += computed["total_goals_lambda"]
 
             player_rows.append({
-                "name":     p["name"],
-                "role":     role,
-                "toi_ev":   preds.get("toi_ev", 0),
-                "toi_pp":   preds.get("toi_pp", 0),
-                "shots":    computed["total_shots_lambda"],
-                "ev_shots": computed["ev_shots"],
-                "pp_shots": computed["pp_shots"],
-                "goals":    computed["total_goals_lambda"],
-                "assists":  assists,
-                "points":   computed["total_goals_lambda"] + assists,
-                "p_goal":   preds.get("scored_ev_goal", 0),
-                "preds":    preds,
-                "computed": computed,
+                "name":             p["name"],
+                "role":             role,
+                "toi_ev":           preds.get("toi_ev", 0),
+                "toi_pp":           preds.get("toi_pp", 0),
+                "shots":            computed["total_shots_lambda"],
+                "shots_season_avg": float(feat_row.get("shots_season_avg", 0) or 0),
+                "goals_season_avg": float(feat_row.get("goals_season_avg", 0) or 0),
+                "points_season_avg":float(feat_row.get("points_season_avg", 0) or 0),
+                "ev_shots":         computed["ev_shots"],
+                "pp_shots":         computed["pp_shots"],
+                "goals":            computed["total_goals_lambda"],
+                "assists":          assists,
+                "points":           computed["total_goals_lambda"] + assists,
+                "p_goal":           preds.get("scored_ev_goal", 0),
+                "preds":            preds,
+                "computed":         computed,
             })
 
         player_rows.sort(key=lambda x: x["shots"], reverse=True)
@@ -922,35 +978,64 @@ def main():
         print(f"{'='*60}")
         for team, res in team_results.items():
             label = "HOME" if res["is_home"] else "AWAY"
-            print(f"  {team} ({label}): {res['team_shots']:.1f} shots  "
+            b2b_label = " ⚡ B2B" if detect_b2b(team, date_str) else ""
+            print(f"  {team} ({label}){b2b_label}: {res['team_shots']:.1f} shots  "
                   f"{res['team_goals']:.2f} goals")
         total_shots = sum(r["team_shots"] for r in team_results.values())
         total_goals = sum(r["team_goals"] for r in team_results.values())
         print(f"  Game total: {total_shots:.1f} shots  {total_goals:.2f} goals")
 
-        print(f"\n  TOP SHOT PROPS (o2.5):")
         all_players = []
         for res in team_results.values():
             all_players.extend(res["players"])
+
+        # ── Shot props — full line ladder ─────────────────────────────────
+        print(f"\n  SHOT PROPS (projected / line ladder):")
+        print(f"  {'Player':<22} {'Proj':>5} {'u2.5':>8} {'o2.5':>8} {'u3.5':>8} "
+              f"{'o3.5':>8} {'o4.5':>8} {'o5.5':>8} {'o6.5':>8}")
+        print(f"  {'-'*22} {'-'*5} {'-'*8} {'-'*8} {'-'*8} {'-'*8} {'-'*8} {'-'*8} {'-'*8}")
         all_players.sort(key=lambda x: x["shots"], reverse=True)
-        for r in all_players[:10]:
-            p_over = empirical_over_prob(r["shots"], 2.5, "shots", prop_calibration)
-            print(f"    {r['name']:<22} {r['shots']:.1f} shots  "
-                  f"o2.5: {format_prob(p_over)}")
+        for r in all_players[:12]:
+            cal_lam = r.get("shots_season_avg") or r["shots"]
+            o25 = empirical_over_prob(cal_lam, 2.5, "shots", prop_calibration)
+            o35 = empirical_over_prob(cal_lam, 3.5, "shots", prop_calibration)
+            o45 = empirical_over_prob(cal_lam, 4.5, "shots", prop_calibration)
+            o55 = empirical_over_prob(cal_lam, 5.5, "shots", prop_calibration)
+            o65 = empirical_over_prob(cal_lam, 6.5, "shots", prop_calibration)
+            u25 = 1 - o25
+            u35 = 1 - o35
+            def fmt(p):
+                p = max(0.001, min(0.999, p))
+                odds = -round((p/(1-p))*100) if p >= 0.5 else round(((1-p)/p)*100)
+                return f"{p:.0%}({odds:+d})"
+            print(f"  {r['name']:<22} {r['shots']:>5.1f} "
+                  f"{fmt(u25):>8} {fmt(o25):>8} {fmt(u35):>8} "
+                  f"{fmt(o35):>8} {fmt(o45):>8} {fmt(o55):>8} {fmt(o65):>8}")
 
-        print(f"\n  TOP GOAL PROPS (anytime scorer):")
+        # ── Goal props ────────────────────────────────────────────────────
+        print(f"\n  GOAL PROPS (anytime scorer):")
+        print(f"  {'Player':<22} {'Proj':>6} {'anytime':>10} {'2+ goals':>10}")
+        print(f"  {'-'*22} {'-'*6} {'-'*10} {'-'*10}")
         all_players.sort(key=lambda x: x["goals"], reverse=True)
-        for r in all_players[:10]:
-            p_goal = empirical_over_prob(r["goals"], 0.5, "goals", prop_calibration)
-            print(f"    {r['name']:<22} λ={r['goals']:.3f}  "
-                  f"anytime: {format_prob(p_goal)}")
+        for r in all_players[:12]:
+            cal_lam = r.get("goals_season_avg") or r["goals"]
+            p1 = empirical_over_prob(cal_lam, 0.5, "goals", prop_calibration)
+            p2 = empirical_over_prob(cal_lam, 1.5, "goals", prop_calibration)
+            print(f"  {r['name']:<22} {r['goals']:>6.3f} "
+                  f"{format_prob(p1):>10} {format_prob(p2):>10}")
 
-        print(f"\n  TOP POINT PROPS (o0.5):")
+        # ── Point props ───────────────────────────────────────────────────
+        print(f"\n  POINT PROPS:")
+        print(f"  {'Player':<22} {'Proj':>6} {'o0.5':>10} {'o1.5':>10} {'o2.5':>10}")
+        print(f"  {'-'*22} {'-'*6} {'-'*10} {'-'*10} {'-'*10}")
         all_players.sort(key=lambda x: x["points"], reverse=True)
-        for r in all_players[:10]:
-            p_point = empirical_over_prob(r["points"], 0.5, "points", prop_calibration)
-            print(f"    {r['name']:<22} {r['points']:.3f} pts  "
-                  f"o0.5: {format_prob(p_point)}")
+        for r in all_players[:12]:
+            cal_lam = r.get("points_season_avg") or r["points"]
+            p05 = empirical_over_prob(cal_lam, 0.5,  "points", prop_calibration)
+            p15 = empirical_over_prob(cal_lam, 1.5,  "points", prop_calibration)
+            p25 = empirical_over_prob(cal_lam, 2.5,  "points", prop_calibration)
+            print(f"  {r['name']:<22} {r['points']:>6.3f} "
+                  f"{format_prob(p05):>10} {format_prob(p15):>10} {format_prob(p25):>10}")
 
         print_zone_matchup(
             home_team, away_team,
