@@ -33,12 +33,15 @@ import pandas as pd
 import xgboost as xgb
 from scipy.stats import poisson
 from scipy.stats import nbinom
-
 warnings.filterwarnings("ignore")
 
 ROOT      = Path(__file__).resolve().parents[1]
 DATA_DIR  = ROOT / "data"
 MODEL_DIR = ROOT / "models/player"
+
+import sys
+sys.path.insert(0, str(ROOT / "scripts"))
+from predict_game import predict_game
 
 PLAYER_FEATURES  = DATA_DIR / "processed/player_features.csv"
 LINEUP_DIR       = DATA_DIR / "raw/lineups"
@@ -1073,7 +1076,7 @@ def main():
             label = "HOME" if res["is_home"] else "AWAY"
             print(f"  {goalie['name']:<22} {team:>5} {opp_shots:>10.1f} {pred_saves:>11.1f} "
                   f"{format_prob(o245):>8} {format_prob(o275):>8} {format_prob(o295):>8}")
-                  
+
         print_zone_matchup(
             home_team, away_team,
             team_results[home_team]["players"],
@@ -1081,6 +1084,16 @@ def main():
             features_df, zone_avgs, pz_df, tz_df,
         )
 
+        # ── Team model predictions ────────────────────────────────────────
+        print(f"\n{'='*60}")
+        print(f"TEAM MODEL PREDICTIONS")
+        print(f"{'='*60}")
+        try:
+            team_preds = predict_game(home_team, away_team,
+                                      game_date=args.date,
+                                      verbose=True)
+        except Exception as e:
+            print(f"  Team model unavailable: {e}")
 
 if __name__ == "__main__":
     main()
