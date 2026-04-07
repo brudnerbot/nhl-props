@@ -742,3 +742,49 @@ DEFERRED:
 - Sub-position splits (C vs LW vs RW)
 - Venue/arena shot-tracking effects
 - Referee PP frequency effects
+
+==============================================================
+UPDATES — April 2026 (continued)
+==============================================================
+
+TEAM MODEL INTEGRATION:
+[x] predict_player_props.py now calls predict_game() at end
+    Shows: win probability, goals (Poisson), shots, xG, strength TOI
+    Team model: EDM 67.3% wp, 3.88 goals; VGK 32.7% wp, 2.91 goals
+    Player model: EDM 28.3 shots, VGK 29.7 shots
+
+KEY FINDING — Player aggregation vs team model for shots:
+  - Sum of ACTUAL player shots: corr=0.984 with actual (leakage)
+  - Sum of PREDICTED player shots: corr=0.120, MAE=5.607 (worse than baseline)
+  - Team model formula: MAE~5.0 (best pre-game predictor)
+  - Conclusion: use team model for team shots/goals, player model for individual props
+
+KEY FINDING — Player lineup impact:
+  - With/without team outcomes: noisy (stars rarely miss games)
+  - Individual xG: confounded by linemate quality (Hyman benefits from McDavid)
+  - xG->team outcomes correlation: 0.096 (barely better than random)
+  - Decision: defer lineup adjustment until on-ice xG from shift data available
+  - build_player_impact.py created but not integrated (waiting for better signal)
+
+DEFERRED — On-ice xG from shift data:
+  - Need to fetch shift/TOI data per player per shift
+  - Join to shot events to get on-ice xG for/against
+  - This will give causal player impact signal (not confounded by linemates)
+  - Currently: on-ice goals (raw) used but noisy
+  - Future: on-ice xG per60 above position avg = clean offensive signal
+             on-ice xGA per60 above league avg = clean defensive signal
+
+NEXT STEPS (updated priority):
+1. BACKTEST (20242025 season)
+   - Run predictions on past games
+   - Compare predicted probs to actual outcomes
+   - Brier score, calibration curve, ROI simulation
+
+2. ON-ICE XG (shift data)
+   - Fetch shift data from NHL API
+   - Join to shot events
+   - Build on-ice xG features per player
+   - Rebuild player_impact.json with clean signals
+   - Integrate lineup adjustment into predictions
+
+3. BOOK LINE INTEGRATION (last)
