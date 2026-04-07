@@ -1046,6 +1046,34 @@ def main():
             print(f"  {r['name']:<22} {r['points']:>6.3f} "
                   f"{format_prob(p05):>10} {format_prob(p15):>10} {format_prob(p25):>10}")
 
+        # ── Goalie save props ─────────────────────────────────────────────
+        print(f"\n  GOALIE SAVE PROPS:")
+        print(f"  {'Goalie':<22} {'Team':>5} {'Opp shots':>10} {'Pred saves':>11} "
+              f"{'o24.5':>8} {'o27.5':>8} {'o29.5':>8}")
+        print(f"  {'-'*22} {'-'*5} {'-'*10} {'-'*11} {'-'*8} {'-'*8} {'-'*8}")
+        LEAGUE_SV_PCT = 0.906
+        for team, res in team_results.items():
+            opp_team  = away_team if team == home_team else home_team
+            opp_res   = team_results[opp_team]
+            opp_shots = opp_res["team_shots"]
+            goalie    = get_goalie_gsax(goalie_df, team)
+            # Regressed save% = league avg adjusted by goalie quality
+            gsax_adj  = goalie["regressed_gsax"] / max(opp_shots, 20)
+            sv_pct    = min(0.940, max(0.870, LEAGUE_SV_PCT + gsax_adj))
+            pred_saves = opp_shots * sv_pct
+            # NegBin for saves (r=8, higher than shots since more stable)
+            from scipy.stats import nbinom
+            def save_over(lam, line, r=6.0):
+                if lam <= 0: return 0.0
+                p = r/(r+lam)
+                return 1.0 - sum(nbinom.pmf(i,r,p) for i in range(int(line+0.5)))
+            o245 = save_over(pred_saves, 24.5)
+            o275 = save_over(pred_saves, 27.5)
+            o295 = save_over(pred_saves, 29.5)
+            label = "HOME" if res["is_home"] else "AWAY"
+            print(f"  {goalie['name']:<22} {team:>5} {opp_shots:>10.1f} {pred_saves:>11.1f} "
+                  f"{format_prob(o245):>8} {format_prob(o275):>8} {format_prob(o295):>8}")
+                  
         print_zone_matchup(
             home_team, away_team,
             team_results[home_team]["players"],
