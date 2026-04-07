@@ -820,3 +820,60 @@ THEN REBUILD FEATURES (after data update):
   python scripts/process_player_features.py
   python scripts/fetch_daily_lineups.py
   python scripts/predict_player_props.py HOME AWAY
+
+==============================================================
+UPDATE — April 6, 2026
+==============================================================
+
+DAILY UPDATE WORKFLOW (corrected):
+  update_data.py now handles ALL data sources in one script:
+  - Fetches PBP ONCE per game, reuses across all updates
+  - Updates: team_game_logs, shot_data, player_pbp_stats,
+             player_game_logs, goalie_game_logs
+  - Fully incremental — deduplicates against existing data
+  - Safe to run repeatedly
+
+  Usage: python scripts/update_data.py --days 7
+  For catching up: python scripts/update_data.py --days 14
+
+  DO NOT run individual fetch scripts for daily updates.
+  Only use individual scripts for full historical re-fetches.
+
+FULL DAILY WORKFLOW:
+  1. python scripts/update_data.py --days 7
+  2. python scripts/build_zone_features.py
+  3. python scripts/process_player_features.py
+  4. python scripts/fetch_daily_lineups.py
+  5. python scripts/predict_player_props.py HOME AWAY
+
+BACKTEST RESULTS (20252026 season, 36,676 player-games):
+  Brier score lifts vs baseline:
+    Shots o2.5:   +12.6%
+    Shots o3.5:   +10.0%
+    Points o0.5:  +8.9%
+    Points o1.5:  +7.2%
+    Goals o0.5:   +4.8%
+  MAE lifts:
+    Shots:   +12.4%
+    Points:  +11.9%
+    Assists: +7.1%
+    Goals:   +5.5%
+  Calibration: excellent — within +/-2% across all buckets
+  Note: ROI simulation requires real closing lines to be meaningful
+        -110 assumption is wrong, books price at true prob + vig
+
+PLAYER LINEUP IMPACT (deferred):
+  build_player_impact.py exists but not integrated
+  With/without approach: too noisy (stars rarely miss games)
+  xG signal: confounded by linemate quality
+  Decision: wait for on-ice xG from shift data
+  When ready: fetch shift data from NHL API shifts endpoint
+    SHIFTS_URL = https://api.nhle.com/stats/rest/en/shiftcharts?cayenneExp=gameId={id}
+    Already used in fetch_player_pbp_stats.py
+    Need to join shots to on-ice players via shift intervals
+    build on-ice xG for/against per player per game
+
+NEXT PRIORITY:
+  1. On-ice xG from shift data (already have shifts in PBP script)
+  2. Closing lines collection (The Odds API, free tier)
+  3. Full backtest with real book lines
