@@ -788,3 +788,35 @@ NEXT STEPS (updated priority):
    - Integrate lineup adjustment into predictions
 
 3. BOOK LINE INTEGRATION (last)
+
+==============================================================
+DAILY UPDATE WORKFLOW
+==============================================================
+
+update_data.py — incremental update for all game logs
+  Usage: python scripts/update_data.py --days 7
+  Default: 7 days lookback
+  Updates: team_game_logs.csv, player_game_logs.csv, goalie_game_logs.csv
+  Method: fetches PBP once per game, extracts rosters, updates all three files
+  Deduplicates against existing data — safe to run repeatedly
+
+fetch_shot_data.py — incremental shot data update
+  Usage: python scripts/fetch_shot_data.py
+  Deduplicates by game_id — safe to run repeatedly
+  Covers all seasons, only fetches new games
+
+fetch_player_pbp_stats.py — incremental PBP stats update
+  Usage: python scripts/fetch_player_pbp_stats.py --seasons 20252026
+  Only fetch current season for daily updates
+  Full refetch: python scripts/fetch_player_pbp_stats.py
+
+FULL DAILY UPDATE (run in this order):
+  python scripts/update_data.py --days 7
+  python scripts/fetch_shot_data.py
+  python scripts/fetch_player_pbp_stats.py --seasons 20252026
+
+THEN REBUILD FEATURES (after data update):
+  python scripts/build_zone_features.py
+  python scripts/process_player_features.py
+  python scripts/fetch_daily_lineups.py
+  python scripts/predict_player_props.py HOME AWAY
